@@ -1,0 +1,29 @@
+# ============ 固件构建产物 ============
+**/build/*.o
+**/build/*.d
+**/build/*.hex
+**/build/*.map
+**/Debug/
+**/build/Debug/
+
+# ============ PyInstaller 打包输出 ============
+host/H723Waveforms/_internal/
+host/H723Waveforms/logs/
+
+# ============ IDE ============
+.cproject
+.project
+.mxproject
+*.uvguix.*
+.settings/
+DebugConfig/
+Listings/
+Objects/
+ launch/
+
+# ============ 系统 ============
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

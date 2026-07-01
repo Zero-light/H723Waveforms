@@ -1,0 +1,15 @@
+{
+  "project": "H723Waveforms",
+  "package_version": "1.0.0",
+  "boards": {
+    "H723ZGT6": {
+      "name": "STM32H723ZGT6",
+      "firmware_build": "firmware/H723ZGT6/build/H723ZGT6_V1.02.elf",
+      "firmware_project": "firmware/H723ZGT6/project/",
+      "firmware_version": "V1.02",
+      "host_app": "host/H723Waveforms/H723Waveforms.exe",
+      "protocol_version": 1,
+      "notes": "ADC polled mode, TIM2+DMA waveform, USB CDC protocol"
+    }
+  }
+}
