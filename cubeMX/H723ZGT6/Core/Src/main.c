@@ -92,10 +92,7 @@ int main(void)
     bool firstHeartbeat = true;
     while (1)
     {
-        /* ── Layer 5: host-triggered burst → auto-send data ──────── */
-        if (APP_ADC_IsBurstDone()) {
-            APP_ADC_SendBurstData();
-        }
+        if (APP_ADC_IsBurstDone()) { APP_ADC_SendBurstData(); }
 
         /* Process received USB frames in main-loop context (not in ISR) */
         Frame_t rxFrame;
@@ -103,18 +100,30 @@ int main(void)
             OnFrameReceived(&rxFrame);
         }
 
-        /* USB uplink heartbeat: register dump once, then silent */
+        /* USB uplink heartbeat: register dump once, then periodic dual read */
         if (HAL_GetTick() - tickTest >= 1000) {
             static Frame_t testFrame;
             if (firstHeartbeat) {
                 int n = snprintf((char *)testFrame.payload,
                     FRAME_MAX_PAYLOAD - 2,
-                    "ADC SQR1=0x%08lX READY",
-                    ADC1->SQR1);
+                    "ADC SQR1=0x%08lX ISR=0x%08lX",
+                    ADC1->SQR1, ADC1->ISR);
                 testFrame.cmd = 0xFF;
                 testFrame.len = (uint16_t)(n < 0 ? 0 : n);
                 APP_Protocol_SendFrame(&testFrame);
                 firstHeartbeat = false;
+            } else {
+                uint16_t raw[2];
+                APP_ADC_ReadDual(raw);
+                unsigned mv0 = (unsigned)((uint32_t)raw[0] * 3300UL / 4095UL);
+                unsigned mv1 = (unsigned)((uint32_t)raw[1] * 3300UL / 4095UL);
+                int n = snprintf((char *)testFrame.payload,
+                    FRAME_MAX_PAYLOAD - 2,
+                    "PA6=%5u(%4umV)  PA7=%5u(%4umV)",
+                    (unsigned)raw[0], mv0, (unsigned)raw[1], mv1);
+                testFrame.cmd = 0xFF;
+                testFrame.len = (uint16_t)(n < 0 ? 0 : n);
+                APP_Protocol_SendFrame(&testFrame);
             }
             tickTest = HAL_GetTick();
         }
@@ -198,11 +207,7 @@ static void OnFrameReceived(const Frame_t *frame)
 
         case CMD_ADC_CONFIG:
         {
-            /* Payload: [ch_mask(1B)][sample_rate_hz(4B LE)][mode(1B)] */
-            if (frame->len < 6) {
-                APP_Protocol_SendAck(CMD_ADC_CONFIG, false);
-                break;
-            }
+            if (frame->len < 6) { APP_Protocol_SendAck(CMD_ADC_CONFIG, false); break; }
             uint32_t rate = ((uint32_t)frame->payload[1])
                           | ((uint32_t)frame->payload[2] << 8)
                           | ((uint32_t)frame->payload[3] << 16)
@@ -214,11 +219,7 @@ static void OnFrameReceived(const Frame_t *frame)
 
         case CMD_ADC_BURST:
         {
-            /* Payload: [ch_mask(1B)][num_samples(4B LE)] */
-            if (frame->len < 5) {
-                APP_Protocol_SendAck(CMD_ADC_BURST, false);
-                break;
-            }
+            if (frame->len < 5) { APP_Protocol_SendAck(CMD_ADC_BURST, false); break; }
             uint8_t  ch = frame->payload[0];
             uint32_t ns = ((uint32_t)frame->payload[1])
                         | ((uint32_t)frame->payload[2] << 8)

@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import os
 import struct
 import time
 import sys
@@ -106,8 +107,11 @@ def main():
     # ── Write Excel ────────────────────────────────────────────────
     out_path = args.output
     if not out_path:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(script_dir, "adc_logs")
+        os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = f"adc_burst_{ts}.xlsx"
+        out_path = os.path.join(log_dir, f"adc_burst_{ts}.xlsx")
 
     wb = openpyxl.Workbook()
     ws = wb.active

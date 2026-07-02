@@ -96,7 +96,10 @@ class SerialLink:
             return False
         try:
             with self._write_lock:
-                self.ser.write(data)
+                n = self.ser.write(data)
+                self.ser.flush()
+                if n != len(data):
+                    print(f"[SerialLink] short write: {n}/{len(data)} bytes")
             return True
         except Exception as e:
             print(f"[SerialLink] send error: {e}")
