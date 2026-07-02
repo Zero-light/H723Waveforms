@@ -1,0 +1,46 @@
+# Build outputs
+firmware/output/
+**/Debug/
+**/Release/
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.o
+*.d
+
+# IDE
+.metadata/
+.settings/
+*.launch
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+host/build/
+host/dist/
+便捷开发工具/V1.0.1/src/build/
+便捷开发工具/V1.0.1/src/dist/
+
+# Logs
+*.log
+adc_logs/
+日志/
+host/logs/
+
+# CubeMX bundled tools (standalone binary, not source)
+cubeMX/Cubeprogrammer/
+
+# Data
+波形excel/
+
+# CubeMX generated duplicates (nested copies accidentally created)
+Drivers/Drivers/
+Middlewares/Middlewares/
+USB_DEVICE/USB_DEVICE/
+
+# OS
+.DS_Store
+Thumbs.db

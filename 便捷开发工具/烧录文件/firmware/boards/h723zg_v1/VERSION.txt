@@ -1,0 +1,5 @@
+h723zg_v1 v1.0.0
+Build: initial
+Date: 2026-06-29
+MCU: STM32H723ZGTx
+Clock: 192 MHz

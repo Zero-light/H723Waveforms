@@ -1,0 +1,18 @@
+由于 STM32H750、730 以及 7B0 这类单片机片内的 flash 空间很小，
+通常只有 128KB，很多时候无法满足使用，所以需要将程序
+下载到片外扩展的 flash 中。
+如果使用常规的ISP下载，芯片会进入读写保护，则无法运行程序，无法进行SWD和JTAG下载
+如果芯片进入读写保护 则需要使用ST官方工具STM32CubeProgrammer 进行USB下载
+或进行外置算法下载 详细请看下方教程
+
+ST官方工具STM32CubeProgrammer 安装教程：
+https://blog.csdn.net/qq_41830158/article/details/121244137?fromshare=blogdetail&sharetype=blogdetail&sharerId=121244137&sharerefer=PC&sharesource=2302_76866290&sharefrom=from_link
+
+使用USB口进行程序下载教程：
+https://blog.csdn.net/qq_41830158/article/details/121246416?fromshare=blogdetail&sharetype=blogdetail&sharerId=121246416&sharerefer=PC&sharesource=2302_76866290&sharefrom=from_link
+
+使用STlink下载器进行程序下载教程：
+https://blog.csdn.net/qq_41830158/article/details/121244779?fromshare=blogdetail&sharetype=blogdetail&sharerId=121244779&sharerefer=PC&sharesource=2302_76866290&sharefrom=from_link
+
+使用UART串口进行程序下载教程：
+https://blog.csdn.net/qq_41830158/article/details/121245283?spm=1001.2014.3001.5502

@@ -1,0 +1,20 @@
+﻿        return x, y
+
+    def _do_update_plot(self):
+        n = self.table.rowCount()
+
+        if n == 0:
+            for curve in self._curves:
+                curve.setData([], [])
+            self._clear_clk_markers()
+            return
+
+        ch_states = []
+        for c in range(NUM_CH):
+            arr = np.array([
+                1 if (self.table.item(r, c) is not None
+                      and self.table.item(r, c).text().strip() == "1")
+                else 0
+                for r in range(n)
+            ], dtype=np.uint8)
+            ch_states.append(arr)
