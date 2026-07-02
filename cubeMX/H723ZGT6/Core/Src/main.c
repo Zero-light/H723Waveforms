@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -13,8 +13,11 @@
 #include "app_protocol.h"
 #include "app_wavegen.h"
 #include "app_spi.h"
-#include "app_adc.h"
+
 #include "app_dac.h"
+#include "app_adc.h"
+#include "usbd_cdc_if.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Provide symbols required by other .c files still in the build */
@@ -54,12 +57,15 @@ int main(void)
     /* Init waveform generator, SPI, ADC and protocol stack */
     APP_WaveGen_Init();
     APP_SPI_Init();
-    APP_ADC_Init();
     APP_DAC_Init();
+    APP_ADC_InitDual(1000);  /* Layer 3: TIM3-triggered, 1 kHz sample rate */
     APP_Protocol_Init(OnFrameReceived);
 
     /* Start USB CDC device */
     MX_USB_DEVICE_Init();
+
+    /* ── Layer 0: Enable ADC12 clock (shared by ADC1/ADC2 on H723) ── */
+    __HAL_RCC_ADC12_CLK_ENABLE();
 
     /* Default waveform: 1 kHz square wave on SCLK (PA1), 下降沿触发 */
     /* 周期 = 2 个Update: 先高电平(SET), 再低电平(RESET), 下降沿有效 */
@@ -83,22 +89,42 @@ int main(void)
     /* Infinite loop */
     uint32_t tickLast = HAL_GetTick();
     uint32_t tickTest = HAL_GetTick();
+    static bool s_firstHeartbeat = true;
     while (1)
     {
-        APP_ADC_Poll();
         /* Process received USB frames in main-loop context (not in ISR) */
         Frame_t rxFrame;
         while (APP_Protocol_GetPendingFrame(&rxFrame)) {
             OnFrameReceived(&rxFrame);
         }
 
-        /* USB uplink heartbeat: send test frame every 1s */
+        /* USB uplink heartbeat: debugs on first, then ADC readings every 1s */
         if (HAL_GetTick() - tickTest >= 1000) {
             static Frame_t testFrame;
-            testFrame.cmd = 0xFF;
-            testFrame.len = 4;
-            memcpy(testFrame.payload, "TEST", 4);
-            APP_Protocol_SendFrame(&testFrame);
+            if (s_firstHeartbeat) {
+                /* Layer 0+1+2: one-shot register dump */
+                int n = snprintf((char *)testFrame.payload,
+                    FRAME_MAX_PAYLOAD - 2,
+                    "ADC SQR1=0x%08lX ISR=0x%08lX",
+                    ADC1->SQR1, ADC1->ISR);
+                testFrame.cmd = 0xFF;
+                testFrame.len = (uint16_t)(n < 0 ? 0 : n);
+                APP_Protocol_SendFrame(&testFrame);
+                s_firstHeartbeat = false;
+            } else {
+                /* Layer 2: periodic PA6+PA7 dual reading */
+                uint16_t raw[2];
+                APP_ADC_ReadDual(raw);
+                unsigned mv0 = (unsigned)((uint32_t)raw[0] * 3300UL / 4095UL);
+                unsigned mv1 = (unsigned)((uint32_t)raw[1] * 3300UL / 4095UL);
+                int n = snprintf((char *)testFrame.payload,
+                    FRAME_MAX_PAYLOAD - 2,
+                    "PA6=%5u(%4umV)  PA7=%5u(%4umV)",
+                    (unsigned)raw[0], mv0, (unsigned)raw[1], mv1);
+                testFrame.cmd = 0xFF;
+                testFrame.len = (uint16_t)(n < 0 ? 0 : n);
+                APP_Protocol_SendFrame(&testFrame);
+            }
             tickTest = HAL_GetTick();
         }
 
@@ -211,60 +237,6 @@ static void OnFrameReceived(const Frame_t *frame)
             uint8_t data_width = frame->payload[1];
             bool ok = APP_SPI_WriteRegs(&frame->payload[2], num_regs, data_width);
             APP_Protocol_SendAck(CMD_SPI_XFER, ok);
-            break;
-        }
-
-        case CMD_ADC_CONFIG:
-        {
-            /* Payload: ch_mask(1B) + sample_rate_hz(4B LE) + mode(1B) */
-            if (frame->len < 6) {
-                APP_Protocol_SendAck(CMD_ADC_CONFIG, false);
-                break;
-            }
-            AdcConfig_t cfg = {0};
-            cfg.ch_mask = frame->payload[0];
-            cfg.sample_rate_hz = ((uint32_t)frame->payload[1])
-                               | ((uint32_t)frame->payload[2] << 8)
-                               | ((uint32_t)frame->payload[3] << 16)
-                               | ((uint32_t)frame->payload[4] << 24);
-            cfg.mode = frame->payload[5];
-            bool ok = APP_ADC_Configure(&cfg);
-            APP_Protocol_SendAck(CMD_ADC_CONFIG, ok);
-            break;
-        }
-
-        case CMD_ADC_CTRL:
-        {
-            /* Payload[0]: 1 = start, 0 = stop */
-            if (frame->len < 1) {
-                APP_Protocol_SendAck(CMD_ADC_CTRL, false);
-                break;
-            }
-            bool ok;
-            if (frame->payload[0]) {
-                ok = APP_ADC_Start();
-            } else {
-                APP_ADC_Stop();
-                ok = true;
-            }
-            APP_Protocol_SendAck(CMD_ADC_CTRL, ok);
-            break;
-        }
-
-        case CMD_ADC_BURST:
-        {
-            /* Payload: ch_mask (1B) + num_samples (4B LE uint32) */
-            if (frame->len < 5) {
-                APP_Protocol_SendAck(CMD_ADC_BURST, false);
-                break;
-            }
-            uint8_t  bChMask     = frame->payload[0];
-            uint32_t bNumSamples = ((uint32_t)frame->payload[1])
-                                 | ((uint32_t)frame->payload[2] << 8)
-                                 | ((uint32_t)frame->payload[3] << 16)
-                                 | ((uint32_t)frame->payload[4] << 24);
-            bool ok = APP_ADC_BurstCapture(bChMask, (uint16_t)bNumSamples);
-            APP_Protocol_SendAck(CMD_ADC_BURST, ok);
             break;
         }
 
@@ -381,7 +353,7 @@ static void MX_TIM2_Init(void)
 }
 
 /**
-  * Enable DMA controller clock
+  * Enable DMA controller clock + TIM2 DMA stream
   */
 static void MX_DMA_Init(void)
 {
@@ -389,7 +361,10 @@ static void MX_DMA_Init(void)
     /* H723 DMAMUX1 shares DMA1 clock (no separate RCC bit) */
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+    HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 }
+
 
 /**
   * @brief GPIO Initialization Function
@@ -407,19 +382,17 @@ static void MX_GPIO_Init(void)
 
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_RESET);
 
-    /* ADC pins: PA6, PA7, PB0, PB1, PC0, PC1, PC2, PC3 as analog */
+    /* DAC pin: PA4 as analog */
     GPIO_InitTypeDef GPIO_InitStructAnalog = {0};
     GPIO_InitStructAnalog.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStructAnalog.Pull = GPIO_NOPULL;
 
-    GPIO_InitStructAnalog.Pin = GPIO_PIN_4 | GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStructAnalog.Pin = GPIO_PIN_4;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStructAnalog);
 
-    GPIO_InitStructAnalog.Pin = GPIO_PIN_0 | GPIO_PIN_1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStructAnalog);
-
-    GPIO_InitStructAnalog.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3;
-    HAL_GPIO_Init(GPIOC, &GPIO_InitStructAnalog);
+    /* ADC pins: PA6 (ADC1_IN3) + PA7 (ADC1_IN7) as analog */
+    GPIO_InitStructAnalog.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStructAnalog);
 
     __HAL_RCC_SYSCFG_CLK_ENABLE();
 
