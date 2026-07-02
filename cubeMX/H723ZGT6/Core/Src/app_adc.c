@@ -1,4 +1,5 @@
 #include "app_adc.h"
+#include "app_protocol.h"
 #include "stm32h7xx_hal.h"
 
 /* ── Peripherals ────────────────────────────────────────────────────── */
@@ -249,4 +250,63 @@ static void ADC_ConfigChannels(uint8_t ch_mask)
 
     if (rank > 0)
         MODIFY_REG(ADC1->SQR1, ADC_SQR1_L_Msk, ((uint32_t)(rank - 1)) << ADC_SQR1_L_Pos);
+}
+
+/* ── Layer 5: host-driven sample rate reconfig ────────────────────── */
+void APP_ADC_SetSampleRate(uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0) return;
+
+    uint32_t tim_clk = HAL_RCC_GetPCLK1Freq();
+    uint32_t apb1_div = (RCC->D2CFGR & RCC_D2CFGR_D2PPRE1_Msk)
+                        >> RCC_D2CFGR_D2PPRE1_Pos;
+    if (apb1_div != RCC_D2CFGR_D2PPRE1_DIV1) tim_clk *= 2;
+
+    uint32_t ticks = tim_clk / sample_rate_hz;
+    if (ticks == 0) ticks = 1;
+
+    __HAL_TIM_SET_PRESCALER(&htim3, ticks - 1);
+    s_sampleRate = sample_rate_hz;
+}
+
+/* ── Layer 5: send DMA buffer as CMD_ADC_DATA frames ──────────────── */
+void APP_ADC_SendBurstData(void)
+{
+    uint8_t num_ch = s_burstNumCh;
+    uint16_t spc  = s_burstCount;
+
+    if (num_ch == 0 || spc == 0) return;
+
+    /* Max samples per frame = (2048 - 4) / (2 * num_ch) */
+    uint16_t max_per_frame = (FRAME_MAX_PAYLOAD - 4) / (2u * num_ch);
+    uint16_t seq_id = 0;
+
+    for (uint32_t offset = 0; offset < spc; offset += max_per_frame) {
+        uint16_t chunk = (uint16_t)((spc - offset) < max_per_frame
+                                    ? (spc - offset) : max_per_frame);
+
+        Frame_t frame = { .cmd = CMD_ADC_DATA };
+        uint16_t pos = 0;
+
+        frame.payload[pos++] = (uint8_t)(seq_id & 0xFF);
+        frame.payload[pos++] = (uint8_t)((seq_id >> 8) & 0xFF);
+        frame.payload[pos++] = s_burstChMask;
+        frame.payload[pos++] = 0;  /* mode */
+
+        /* Interleave: [CH0, CH1, CH0, CH1, ...] */
+        for (uint16_t i = 0; i < chunk; i++) {
+            for (uint8_t c = 0; c < num_ch; c++) {
+                uint16_t s = s_rawBuf[(offset + i) * num_ch + c];
+                frame.payload[pos++] = (uint8_t)(s & 0xFF);
+                frame.payload[pos++] = (uint8_t)((s >> 8) & 0xFF);
+            }
+        }
+
+        frame.len = pos;
+        APP_Protocol_SendFrame(&frame);
+        seq_id++;
+
+        /* Small gap to let USB ISR complete */
+        for (volatile uint32_t d = 0; d < 10000; d++) { __NOP(); }
+    }
 }

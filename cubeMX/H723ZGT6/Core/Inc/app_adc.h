@@ -7,18 +7,15 @@
 #define ADC_BURST_MAX_SAMPLES  32768
 #define ADC_MAX_CHANNELS       2
 
-/* ── Layer 3: dual-channel scan + TIM3 trigger ───────────────────── */
+/* ── Init + read ──────────────────────────────────────────────────── */
 void APP_ADC_InitDual(uint32_t sample_rate_hz);
 void APP_ADC_ReadDual(uint16_t raw[2]);
+void APP_ADC_SetSampleRate(uint32_t sample_rate_hz);
 
-/* ── Layer 4: DMA-based burst capture ────────────────────────────── */
+/* ── DMA burst ────────────────────────────────────────────────────── */
 bool APP_ADC_StartBurst(uint8_t ch_mask, uint16_t num_samples);
 bool APP_ADC_IsBurstDone(void);
-
-/* After burst done: raw0/raw1 point into internal DMA buffer (read-only). */
-void APP_ADC_GetBurstResult(const uint16_t **raw0, const uint16_t **raw1,
-                            uint16_t *count);
-
-void APP_ADC_DMA_IRQHandler(void);  /* called from DMA1_Stream1 ISR */
+void APP_ADC_SendBurstData(void);  /* pack + send via CDC after burst done */
+void APP_ADC_DMA_IRQHandler(void);
 
 #endif /* APP_ADC_H */

@@ -89,21 +89,12 @@ int main(void)
     /* Infinite loop */
     uint32_t tickLast = HAL_GetTick();
     uint32_t tickTest = HAL_GetTick();
-    int heartbeatPhase = 0;  /* 0=regdump, 1=burst, 2+=normal */
+    bool firstHeartbeat = true;
     while (1)
     {
-        /* ── Burst polling (Layer 4) ────────────────────────────── */
-        if (heartbeatPhase == 1 && APP_ADC_IsBurstDone()) {
-            const uint16_t *r0, *r1;
-            uint16_t cnt;
-            APP_ADC_GetBurstResult(&r0, &r1, &cnt);
-            char msg[128];
-            int n = snprintf(msg, sizeof(msg),
-                "BURST OK: %u spc, ch0[0]=%u ch0[%u]=%u  ch1[0]=%u ch1[%u]=%u",
-                cnt, r0[0], cnt-1, r0[cnt-1],
-                r1 ? r1[0] : 0, r1 ? cnt-1 : 0, r1 ? r1[cnt-1] : 0);
-            CDC_Transmit_HS((uint8_t *)msg, (uint16_t)n);
-            heartbeatPhase = 2;
+        /* ── Layer 5: host-triggered burst → auto-send data ──────── */
+        if (APP_ADC_IsBurstDone()) {
+            APP_ADC_SendBurstData();
         }
 
         /* Process received USB frames in main-loop context (not in ISR) */
@@ -112,34 +103,18 @@ int main(void)
             OnFrameReceived(&rxFrame);
         }
 
-        /* USB uplink heartbeat: debugs on first, then ADC readings every 1s */
+        /* USB uplink heartbeat: register dump once, then silent */
         if (HAL_GetTick() - tickTest >= 1000) {
             static Frame_t testFrame;
-            if (heartbeatPhase == 0) {
-                /* One-shot register dump */
+            if (firstHeartbeat) {
                 int n = snprintf((char *)testFrame.payload,
                     FRAME_MAX_PAYLOAD - 2,
-                    "ADC SQR1=0x%08lX ISR=0x%08lX",
-                    ADC1->SQR1, ADC1->ISR);
+                    "ADC SQR1=0x%08lX READY",
+                    ADC1->SQR1);
                 testFrame.cmd = 0xFF;
                 testFrame.len = (uint16_t)(n < 0 ? 0 : n);
                 APP_Protocol_SendFrame(&testFrame);
-                /* Trigger 100-sample dual-channel DMA burst */
-                APP_ADC_StartBurst(0x03, 100);
-                heartbeatPhase = 1;
-            } else if (heartbeatPhase >= 2) {
-                /* Periodic PA6+PA7 dual reading (one-shot via TIM3) */
-                uint16_t raw[2];
-                APP_ADC_ReadDual(raw);
-                unsigned mv0 = (unsigned)((uint32_t)raw[0] * 3300UL / 4095UL);
-                unsigned mv1 = (unsigned)((uint32_t)raw[1] * 3300UL / 4095UL);
-                int n = snprintf((char *)testFrame.payload,
-                    FRAME_MAX_PAYLOAD - 2,
-                    "PA6=%5u(%4umV)  PA7=%5u(%4umV)",
-                    (unsigned)raw[0], mv0, (unsigned)raw[1], mv1);
-                testFrame.cmd = 0xFF;
-                testFrame.len = (uint16_t)(n < 0 ? 0 : n);
-                APP_Protocol_SendFrame(&testFrame);
+                firstHeartbeat = false;
             }
             tickTest = HAL_GetTick();
         }
@@ -218,6 +193,40 @@ static void OnFrameReceived(const Frame_t *frame)
                 ok = true;
             }
             APP_Protocol_SendAck(CMD_WAVE_CTRL, ok);
+            break;
+        }
+
+        case CMD_ADC_CONFIG:
+        {
+            /* Payload: [ch_mask(1B)][sample_rate_hz(4B LE)][mode(1B)] */
+            if (frame->len < 6) {
+                APP_Protocol_SendAck(CMD_ADC_CONFIG, false);
+                break;
+            }
+            uint32_t rate = ((uint32_t)frame->payload[1])
+                          | ((uint32_t)frame->payload[2] << 8)
+                          | ((uint32_t)frame->payload[3] << 16)
+                          | ((uint32_t)frame->payload[4] << 24);
+            APP_ADC_SetSampleRate(rate);
+            APP_Protocol_SendAck(CMD_ADC_CONFIG, true);
+            break;
+        }
+
+        case CMD_ADC_BURST:
+        {
+            /* Payload: [ch_mask(1B)][num_samples(4B LE)] */
+            if (frame->len < 5) {
+                APP_Protocol_SendAck(CMD_ADC_BURST, false);
+                break;
+            }
+            uint8_t  ch = frame->payload[0];
+            uint32_t ns = ((uint32_t)frame->payload[1])
+                        | ((uint32_t)frame->payload[2] << 8)
+                        | ((uint32_t)frame->payload[3] << 16)
+                        | ((uint32_t)frame->payload[4] << 24);
+            bool ok = APP_ADC_StartBurst(ch, (uint16_t)(ns > ADC_BURST_MAX_SAMPLES
+                                                         ? ADC_BURST_MAX_SAMPLES : ns));
+            APP_Protocol_SendAck(CMD_ADC_BURST, ok);
             break;
         }
 
