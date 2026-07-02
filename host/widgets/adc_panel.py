@@ -99,55 +99,48 @@ class AdcPanel(QWidget):
         cfg.addWidget(self.btn_go)
         outer.addLayout(cfg)
 
-        self.lbl_status = QLabel("就绪")
-        self.lbl_status.setStyleSheet("color: gray;")
-        outer.addWidget(self.lbl_status)
-
-        # ── Plot area: offset panel + plot ──────────────────────
-        plot_row = QHBoxLayout()
-
-        # Left offset panel
-        off_panel = QVBoxLayout()
-        off_panel.setSpacing(4)
-        lbl = QLabel("<b>偏移(V)</b>")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        off_panel.addWidget(lbl)
+        # ── Offset row ────────────────────────────────────────
+        off_row = QHBoxLayout()
+        off_row.addWidget(QLabel("偏移:"))
+        self._offset_spins = []
         for i in range(NUM_CH):
-            row = QHBoxLayout()
             color = CH_COLORS[i]
-            name_lbl = QLabel(f"<font color='rgb{color}'>{CH_NAMES[i]}</font>")
-            name_lbl.setFixedWidth(32)
-            row.addWidget(name_lbl)
+            off_row.addWidget(QLabel(f"<font color='rgb{color}'>{CH_NAMES[i]}</font>"))
             spin = QDoubleSpinBox()
             spin.setRange(-3.0, 3.0)
             spin.setSingleStep(0.1)
             spin.setValue(0.0)
             spin.setDecimals(1)
-            spin.setFixedWidth(60)
+            spin.setFixedWidth(90)
             spin.valueChanged.connect(lambda v, i=i: self._schedule_update())
-            row.addWidget(spin)
+            off_row.addWidget(spin)
             self._offset_spins.append(spin)
-            off_panel.addLayout(row)
-        off_panel.addStretch()
-        plot_row.addLayout(off_panel)
+        off_row.addStretch()
+        outer.addLayout(off_row)
 
-        # Plot
+        self.lbl_status = QLabel("就绪")
+        self.lbl_status.setStyleSheet("color: gray;")
+        outer.addWidget(self.lbl_status)
+
+        # ── Plot ───────────────────────────────────────────────
         self.plot_widget = pg.PlotWidget(viewBox=AdcViewBox())
         self.plot_widget.setLabel("bottom", "样本序号")
+        self.plot_widget.setLabel("left", "电压", units="V")
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_widget.setYRange(-0.5, 7.5, padding=0.0)
         ticks = []
         for i in range(NUM_CH):
             y0 = CH_BASE[i]
-            ticks.append((y0, CH_NAMES[i]))
+            ticks.append((y0, f"{CH_NAMES[i]} 0V"))
+            for v in (1, 2, 3):
+                ticks.append((y0 + v, f"{CH_NAMES[i]} {v}V"))
         self.plot_widget.getAxis("left").setTicks([ticks])
         self._curves = []
         for i in range(NUM_CH):
             pen = pg.mkPen(color=CH_COLORS[i], width=1.5)
             curve = self.plot_widget.plot(pen=pen, name=CH_NAMES[i])
             self._curves.append(curve)
-        plot_row.addWidget(self.plot_widget, stretch=1)
-        outer.addLayout(plot_row, stretch=1)
+        outer.addWidget(self.plot_widget, stretch=1)
 
     def _schedule_update(self):
         self._update_plot()
