@@ -89,9 +89,23 @@ int main(void)
     /* Infinite loop */
     uint32_t tickLast = HAL_GetTick();
     uint32_t tickTest = HAL_GetTick();
-    static bool s_firstHeartbeat = true;
+    int heartbeatPhase = 0;  /* 0=regdump, 1=burst, 2+=normal */
     while (1)
     {
+        /* ── Burst polling (Layer 4) ────────────────────────────── */
+        if (heartbeatPhase == 1 && APP_ADC_IsBurstDone()) {
+            const uint16_t *r0, *r1;
+            uint16_t cnt;
+            APP_ADC_GetBurstResult(&r0, &r1, &cnt);
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg),
+                "BURST OK: %u spc, ch0[0]=%u ch0[%u]=%u  ch1[0]=%u ch1[%u]=%u",
+                cnt, r0[0], cnt-1, r0[cnt-1],
+                r1 ? r1[0] : 0, r1 ? cnt-1 : 0, r1 ? r1[cnt-1] : 0);
+            CDC_Transmit_HS((uint8_t *)msg, (uint16_t)n);
+            heartbeatPhase = 2;
+        }
+
         /* Process received USB frames in main-loop context (not in ISR) */
         Frame_t rxFrame;
         while (APP_Protocol_GetPendingFrame(&rxFrame)) {
@@ -101,8 +115,8 @@ int main(void)
         /* USB uplink heartbeat: debugs on first, then ADC readings every 1s */
         if (HAL_GetTick() - tickTest >= 1000) {
             static Frame_t testFrame;
-            if (s_firstHeartbeat) {
-                /* Layer 0+1+2: one-shot register dump */
+            if (heartbeatPhase == 0) {
+                /* One-shot register dump */
                 int n = snprintf((char *)testFrame.payload,
                     FRAME_MAX_PAYLOAD - 2,
                     "ADC SQR1=0x%08lX ISR=0x%08lX",
@@ -110,9 +124,11 @@ int main(void)
                 testFrame.cmd = 0xFF;
                 testFrame.len = (uint16_t)(n < 0 ? 0 : n);
                 APP_Protocol_SendFrame(&testFrame);
-                s_firstHeartbeat = false;
-            } else {
-                /* Layer 2: periodic PA6+PA7 dual reading */
+                /* Trigger 100-sample dual-channel DMA burst */
+                APP_ADC_StartBurst(0x03, 100);
+                heartbeatPhase = 1;
+            } else if (heartbeatPhase >= 2) {
+                /* Periodic PA6+PA7 dual reading (one-shot via TIM3) */
                 uint16_t raw[2];
                 APP_ADC_ReadDual(raw);
                 unsigned mv0 = (unsigned)((uint32_t)raw[0] * 3300UL / 4095UL);

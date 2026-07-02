@@ -22,7 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app_adc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -206,6 +206,14 @@ void SysTick_Handler(void)
 void DMA1_Stream0_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_tim2_up);
+}
+
+/**
+  * @brief This function handles DMA1 stream1 global interrupt (ADC1).
+  */
+void DMA1_Stream1_IRQHandler(void)
+{
+  APP_ADC_DMA_IRQHandler();
 }
 
 /**
