@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""ADC one-click burst capture + auto Excel export."""
+"""ADC one-click burst capture + auto Excel export.
+Two channels offset vertically, independently adjustable."""
 
 import os
 import threading
@@ -11,17 +12,32 @@ import openpyxl
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QSpinBox, QGroupBox, QMessageBox, QCheckBox,
+    QSpinBox, QDoubleSpinBox, QGroupBox, QMessageBox, QCheckBox,
+    QSplitter,
 )
 
 from comm.protocol import build_adc_config, build_adc_burst, parse_adc_data
 from comm.protocol import CMD_ACK, CMD_ADC_DATA
 from comm.serial_link import SerialLink
 
-CH_COLORS = [(255, 0, 0), (0, 255, 0)]
+CH_COLORS = [(255, 80, 80), (80, 200, 80)]
 CH_PINS   = ["PA6", "PA7"]
+CH_NAMES  = ["PA6", "PA7"]
 ADC_VREF  = 3.3
 ADC_MAX   = 4095.0
+NUM_CH    = 2
+CH_BASE   = [5.0, 2.0]   # y-baseline per channel (volt)
+
+class AdcViewBox(pg.ViewBox):
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.setMouseMode(pg.ViewBox.PanMode)
+    def wheelEvent(self, ev, axis=None):
+        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            super().wheelEvent(ev, axis=0)
+        else:
+            super().wheelEvent(ev, axis=1)
+        ev.accept()
 
 
 class AdcPanel(QWidget):
@@ -32,6 +48,7 @@ class AdcPanel(QWidget):
         self.link = link
         self._sample_rate = 20000
         self._lock = threading.Lock()
+        self._offset_spins = []
 
         self._burst_pending = False
         self._burst_expect  = 0
@@ -39,7 +56,7 @@ class AdcPanel(QWidget):
         self._burst_num_ch   = 0
         self._burst_ch_mask  = 0
         self._burst_buf      = []
-        self._buffers = [[] for _ in range(2)]
+        self._buffers = [[] for _ in range(NUM_CH)]
 
         self._setup_ui()
 
@@ -48,7 +65,8 @@ class AdcPanel(QWidget):
         self._plot_timer.start(100)
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
 
         # ── Config row ─────────────────────────────────────────
         cfg = QHBoxLayout()
@@ -74,31 +92,65 @@ class AdcPanel(QWidget):
             cfg.addWidget(chk)
 
         cfg.addStretch()
-        layout.addLayout(cfg)
 
-        # ── One button ─────────────────────────────────────────
-        self.btn_go = QPushButton("采集并导出 Excel")
+        self.btn_go = QPushButton("采集并导出Excel")
         self.btn_go.setStyleSheet("font-weight: bold; min-height: 32px; font-size: 14px;")
         self.btn_go.clicked.connect(self._on_go)
-        layout.addWidget(self.btn_go)
+        cfg.addWidget(self.btn_go)
+        outer.addLayout(cfg)
 
-        # ── Status ─────────────────────────────────────────────
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setStyleSheet("color: gray;")
-        layout.addWidget(self.lbl_status)
+        outer.addWidget(self.lbl_status)
 
-        # ── Plot ───────────────────────────────────────────────
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("left", "电压", units="V")
+        # ── Plot area: offset panel + plot ──────────────────────
+        plot_row = QHBoxLayout()
+
+        # Left offset panel
+        off_panel = QVBoxLayout()
+        off_panel.setSpacing(4)
+        lbl = QLabel("<b>偏移(V)</b>")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        off_panel.addWidget(lbl)
+        for i in range(NUM_CH):
+            row = QHBoxLayout()
+            color = CH_COLORS[i]
+            name_lbl = QLabel(f"<font color='rgb{color}'>{CH_NAMES[i]}</font>")
+            name_lbl.setFixedWidth(32)
+            row.addWidget(name_lbl)
+            spin = QDoubleSpinBox()
+            spin.setRange(-3.0, 3.0)
+            spin.setSingleStep(0.1)
+            spin.setValue(0.0)
+            spin.setDecimals(1)
+            spin.setFixedWidth(60)
+            spin.valueChanged.connect(lambda v, i=i: self._schedule_update())
+            row.addWidget(spin)
+            self._offset_spins.append(spin)
+            off_panel.addLayout(row)
+        off_panel.addStretch()
+        plot_row.addLayout(off_panel)
+
+        # Plot
+        self.plot_widget = pg.PlotWidget(viewBox=AdcViewBox())
         self.plot_widget.setLabel("bottom", "样本序号")
-        self.plot_widget.setYRange(0, ADC_VREF, padding=0.05)
         self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.setYRange(-0.5, 7.5, padding=0.0)
+        ticks = []
+        for i in range(NUM_CH):
+            y0 = CH_BASE[i]
+            ticks.append((y0, CH_NAMES[i]))
+        self.plot_widget.getAxis("left").setTicks([ticks])
         self._curves = []
-        for i in range(2):
+        for i in range(NUM_CH):
             pen = pg.mkPen(color=CH_COLORS[i], width=1.5)
-            curve = self.plot_widget.plot(pen=pen, name=CH_PINS[i])
+            curve = self.plot_widget.plot(pen=pen, name=CH_NAMES[i])
             self._curves.append(curve)
-        layout.addWidget(self.plot_widget, stretch=1)
+        plot_row.addWidget(self.plot_widget, stretch=1)
+        outer.addLayout(plot_row, stretch=1)
+
+    def _schedule_update(self):
+        self._update_plot()
 
     def _ch_mask(self):
         mask = 0
@@ -137,7 +189,6 @@ class AdcPanel(QWidget):
         self.lbl_status.setStyleSheet("color: orange; font-weight: bold;")
 
         self.link.send(build_adc_config(mask, rate, mode=0).to_bytes())
-        # Small delay, then burst
         QTimer.singleShot(50, lambda: self._send_burst(mask, ns))
 
     def _send_burst(self, mask, ns):
@@ -173,7 +224,7 @@ class AdcPanel(QWidget):
                     with self._lock:
                         for c in range(num_en):
                             self._buffers[c] = list(np.concatenate(buf[c])) if buf[c] else []
-                        for c in range(num_en, 2):
+                        for c in range(num_en, NUM_CH):
                             self._buffers[c] = []
 
                     self._burst_pending = False
@@ -185,11 +236,10 @@ class AdcPanel(QWidget):
                     self.log_signal.emit(f"[INFO] Burst完成: {expected_spc} spc/ch")
 
         elif frame.cmd == CMD_ACK:
-            pass  # silent
+            pass
 
     def _export_excel(self):
-        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        log_dir = os.path.join(script_dir, "adc_logs")
+        log_dir = r"D:\test\STM32H723ZGT6\host\adc_logs"
         os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(log_dir, f"adc_{ts}.xlsx")
@@ -198,7 +248,6 @@ class AdcPanel(QWidget):
         ws = wb.active
         ws.title = "ADC"
         num_ch = self._burst_num_ch
-
         headers = ["样本序号"]
         for c in range(num_ch):
             headers.append(f"{CH_PINS[c]} 电压(V)")
@@ -212,32 +261,34 @@ class AdcPanel(QWidget):
                 raw = self._buffers[c][r] if r < len(self._buffers[c]) else 0
                 ws.cell(row=r + 2, column=c + 2,
                         value=round(raw * ADC_VREF / ADC_MAX, 4))
-
         wb.save(path)
         self.log_signal.emit(f"[INFO] Excel已保存: {path}")
 
     def _update_plot(self):
         with self._lock:
             bufs = [list(b) for b in self._buffers]
-        for i in range(2):
+        for i in range(NUM_CH):
             buf = bufs[i]
-            if not buf:
+            if not buf or i >= self._burst_num_ch:
                 self._curves[i].setData([], [])
                 continue
             arr = np.array(buf, dtype=np.float32)
             volts = arr * ADC_VREF / ADC_MAX
             n = len(volts)
+            offset = self._offset_spins[i].value() if i < len(self._offset_spins) else 0.0
+            y_base = CH_BASE[i] + offset
+
             if n > 8000:
                 bs = max(n // 4000, 2)
                 trim = n - (n % bs)
-                volts = volts[:trim].reshape(-1, bs)
-                v_max = volts.max(axis=1)
-                v_min = volts.min(axis=1)
+                v = volts[:trim].reshape(-1, bs)
+                v_max = v.max(axis=1)
+                v_min = v.min(axis=1)
                 x = np.arange(0, trim, bs, dtype=np.float64)
                 x2 = np.empty(len(v_max) * 2, dtype=np.float64)
                 y2 = np.empty(len(v_max) * 2, dtype=np.float32)
                 x2[0::2] = x; x2[1::2] = x + bs
-                y2[0::2] = v_min; y2[1::2] = v_max
+                y2[0::2] = v_min + y_base; y2[1::2] = v_max + y_base
                 self._curves[i].setData(x2, y2)
             else:
-                self._curves[i].setData(np.arange(n), volts)
+                self._curves[i].setData(np.arange(n), volts + y_base)

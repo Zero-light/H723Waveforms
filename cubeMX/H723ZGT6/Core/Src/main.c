@@ -100,29 +100,22 @@ int main(void)
             OnFrameReceived(&rxFrame);
         }
 
-        /* USB uplink heartbeat: register dump once, then periodic dual read */
+        /* Heartbeat: SQR1 dump once, then "TEST" every 1s */
         if (HAL_GetTick() - tickTest >= 1000) {
             static Frame_t testFrame;
             if (firstHeartbeat) {
                 int n = snprintf((char *)testFrame.payload,
                     FRAME_MAX_PAYLOAD - 2,
-                    "ADC SQR1=0x%08lX ISR=0x%08lX",
-                    ADC1->SQR1, ADC1->ISR);
+                    "ADC SQR1=0x%08lX",
+                    ADC1->SQR1);
                 testFrame.cmd = 0xFF;
                 testFrame.len = (uint16_t)(n < 0 ? 0 : n);
                 APP_Protocol_SendFrame(&testFrame);
                 firstHeartbeat = false;
             } else {
-                uint16_t raw[2];
-                APP_ADC_ReadDual(raw);
-                unsigned mv0 = (unsigned)((uint32_t)raw[0] * 3300UL / 4095UL);
-                unsigned mv1 = (unsigned)((uint32_t)raw[1] * 3300UL / 4095UL);
-                int n = snprintf((char *)testFrame.payload,
-                    FRAME_MAX_PAYLOAD - 2,
-                    "PA6=%5u(%4umV)  PA7=%5u(%4umV)",
-                    (unsigned)raw[0], mv0, (unsigned)raw[1], mv1);
                 testFrame.cmd = 0xFF;
-                testFrame.len = (uint16_t)(n < 0 ? 0 : n);
+                testFrame.len = 4;
+                memcpy(testFrame.payload, "TEST", 4);
                 APP_Protocol_SendFrame(&testFrame);
             }
             tickTest = HAL_GetTick();
