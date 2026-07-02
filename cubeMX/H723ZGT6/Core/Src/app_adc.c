@@ -126,12 +126,17 @@ bool APP_ADC_StartBurst(uint8_t ch_mask, uint16_t num_samples)
     s_burstChMask = ch_mask;
     s_burstNumCh  = num_ch;
 
-    hdma_adc1.Init.Mode = DMA_NORMAL;
+    /* Full reset: ensure ADC+DMA are stopped clean before restart */
+    HAL_ADC_Stop_DMA(&hadc1);
     HAL_DMA_Abort(&hdma_adc1);
+    hdma_adc1.Init.Mode = DMA_NORMAL;
     HAL_DMA_Init(&hdma_adc1);
 
-    /* Use HAL_ADC_Start_DMA so DMA callbacks are linked to ADC handle */
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t *)s_rawBuf, total);
+    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)s_rawBuf, total) != HAL_OK) {
+        s_burstDone = true;
+        s_burstErr  = true;
+        return false;
+    }
 
     __HAL_TIM_SET_COUNTER(&htim3, 0);
     HAL_TIM_Base_Start(&htim3);
