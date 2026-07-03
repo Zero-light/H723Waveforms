@@ -25,7 +25,7 @@ from comm.protocol import (
 )
 from comm.serial_link import SerialLink
 
-_TEMPLATES_PATH = os.path.join(os.path.expanduser("~"), ".h723_wave_templates.json")
+_TEMPLATES_PATH = os.path.join("D:/project/q4/reg", ".h723_wave_templates.json")
 _CURRENT_KEY = "__current__"
 
 CH_NAMES = ["XYNC", "SCLK", "SH_R", "SH_S", "RST"]
@@ -54,8 +54,10 @@ class WavePanel(QWidget):
         self._clk_lines: List[pg.InfiniteLine] = []
         self._clk_texts: List[pg.TextItem] = []
         self._curves: List[pg.PlotDataItem] = []
+        self._name_labels: List[pg.TextItem] = []
 
         # CLK markers visibility flag
+        self._last_ie_dir = "D:/test/STM32H723ZGT6/host/dist/wavrforms_truth"
         self._show_clk_markers = True
 
         # Debounce for plot updates
@@ -206,9 +208,21 @@ class WavePanel(QWidget):
         tmpl_row.addStretch()
         rule_inner.addLayout(tmpl_row)
 
-        ctrl_layout.addWidget(rule_box, stretch=1)
+        ctrl_layout.addWidget(rule_box, stretch=3)
 
-        # --- 3. Playback ---
+        # --- 2b. Rule Import/Export ---
+        rule_io_box = QGroupBox("规则导入导出")
+        rule_io_layout = QVBoxLayout(rule_io_box)
+        rule_io_layout.setContentsMargins(6, 6, 6, 6)
+        self.btn_export_rules = QPushButton("导出规则至Excel")
+        self.btn_export_rules.clicked.connect(self._export_rules_excel)
+        rule_io_layout.addWidget(self.btn_export_rules)
+        self.btn_import_rules = QPushButton("从Excel导入规则")
+        self.btn_import_rules.clicked.connect(self._import_rules_excel)
+        rule_io_layout.addWidget(self.btn_import_rules)
+        rule_io_layout.addStretch()
+
+        # --- 3. Playback (below rule_io in vertical column) ---
         play_box = QGroupBox("播放控制")
         play_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         play_inner = QVBoxLayout(play_box)
@@ -224,7 +238,15 @@ class WavePanel(QWidget):
         play_inner.addWidget(self.btn_stop)
 
         play_inner.addStretch()
-        ctrl_layout.addWidget(play_box, stretch=0)
+
+        # Stack rule_io and play vertically in a column
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        right_layout.addWidget(rule_io_box)
+        right_layout.addWidget(play_box)
+        ctrl_layout.addWidget(right_panel, stretch=2)
 
         main_splitter.addWidget(ctrl_widget)
 
@@ -293,6 +315,19 @@ class WavePanel(QWidget):
             pen = pg.mkPen(color=CH_COLORS[i], width=2)
             curve = self.plot_widget.plot(pen=pen, name=CH_NAMES[i])
             self._curves.append(curve)
+
+        # Name labels that follow offset
+        for i in range(NUM_CH):
+            color = CH_COLORS[i]
+            txt = pg.TextItem(
+                text=CH_NAMES[i],
+                color=color,
+                anchor=(0, 0.5),
+                fill=pg.mkColor(0, 0, 0, 160),
+            )
+            txt.setZValue(10)
+            self.plot_widget.addItem(txt)
+            self._name_labels.append(txt)
 
         plot_outer.addWidget(self.plot_widget, stretch=1)
         display_splitter.addWidget(plot_box)
@@ -673,6 +708,8 @@ class WavePanel(QWidget):
         if n == 0:
             for curve in self._curves:
                 curve.setData([], [])
+            for lbl in self._name_labels:
+                lbl.setPos(-1000, -1000)
             self._clear_clk_markers()
             return
 
@@ -728,6 +765,10 @@ class WavePanel(QWidget):
             offset = self._offset_spins[c].value() if c < len(self._offset_spins) else 0.0
             x, y = self._stair_step(ch_states[c], y_base, offset)
             self._curves[c].setData(x, y)
+            # Update name label position to follow offset
+            if c < len(self._name_labels):
+                first_y = y[0] if len(y) > 0 else y_base + offset
+                self._name_labels[c].setPos(0, first_y)
 
         self.plot_widget.setXRange(0, n, padding=0.02)
 
@@ -752,10 +793,11 @@ class WavePanel(QWidget):
         ch_names = [edit.text() for edit in self._name_edits]
 
         filepath, _ = QFileDialog.getSaveFileName(
-            self, "导出波形数据", "", "Excel Files (*.xlsx)"
+            self, "导出波形数据", self._last_ie_dir, "Excel Files (*.xlsx)"
         )
         if not filepath:
             return
+        self._last_ie_dir = os.path.dirname(filepath)
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -781,10 +823,11 @@ class WavePanel(QWidget):
 
     def _import_excel(self):
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "导入波形数据", "", "Excel Files (*.xlsx)"
+            self, "导入波形数据", self._last_ie_dir, "Excel Files (*.xlsx)"
         )
         if not filepath:
             return
+        self._last_ie_dir = os.path.dirname(filepath)
 
         try:
             wb = openpyxl.load_workbook(filepath, data_only=True)
@@ -878,6 +921,135 @@ class WavePanel(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "导入失败", f"读取 Excel 文件时出错:\n{str(e)}")
             self.log_signal.emit(f"[ERROR] Excel 导入失败: {e}")
+
+    # ============================================================
+    # Rule Excel Import / Export
+    # ============================================================
+
+    def _export_rules_excel(self):
+        """Export timing rules (rule table + initial states) to Excel."""
+        from PyQt6.QtWidgets import QInputDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出时序规则", self._last_ie_dir,
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+        self._last_ie_dir = os.path.dirname(path)
+
+        data = self._gather_rules_data()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "规则"
+
+        # Header
+        headers = ["通道", "触发编程(Point)", "时序类型", "持续宽度(Points)"]
+        for ci, h in enumerate(headers, 1):
+            ws.cell(row=1, column=ci, value=h)
+
+        # Write rules
+        rules = data.get("rules", [])
+        for ri, rule in enumerate(rules):
+            row_idx = ri + 2
+            ws.cell(row=row_idx, column=1, value=rule.get("channel", ""))
+            ws.cell(row=row_idx, column=2, value=rule.get("edge", 0))
+            ws.cell(row=row_idx, column=3, value=rule.get("level", ""))
+            ws.cell(row=row_idx, column=4, value=rule.get("width", 0))
+
+        # Also write initial states in a second sheet
+        ws2 = wb.create_sheet(title="初始状态")
+        ws2.cell(row=1, column=1, value="通道")
+        ws2.cell(row=1, column=2, value="初始电平")
+        init_states = data.get("initial_states", {})
+        for i, ch in enumerate(CH_NAMES):
+            ws2.cell(row=i + 2, column=1, value=ch)
+            ws2.cell(row=i + 2, column=2, value=init_states.get(ch, "低"))
+
+        wb.save(path)
+        self.log_signal.emit(f"[INFO] 时序规则已导出到 {path}")
+        QMessageBox.information(self, "导出成功",
+            f"时序规则已导出: {os.path.basename(path)}")
+
+    def _import_rules_excel(self):
+        """Import timing rules from Excel (editable, loads into rule table)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "从Excel导入时序规则", self._last_ie_dir,
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+        self._last_ie_dir = os.path.dirname(path)
+
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = wb.active
+            if ws is None:
+                ws = wb.worksheets[0]
+
+            max_row = ws.max_row
+            if max_row < 2:
+                QMessageBox.warning(self, "导入失败", "不存在规则数据。")
+                return
+
+            # Clear existing rules
+            self.rule_table.setRowCount(0)
+
+            # Read rules from sheet 1 (2..max_row)
+            for row in range(2, max_row + 1):
+                ch = ws.cell(row=row, column=1).value
+                edge = ws.cell(row=row, column=2).value
+                level = ws.cell(row=row, column=3).value
+                width = ws.cell(row=row, column=4).value
+                if not ch:
+                    continue
+                # Add rule row (replicates _add_rule logic)
+                r = self.rule_table.rowCount()
+                self.rule_table.insertRow(r)
+                ch_combo = QComboBox()
+                for name in CH_NAMES:
+                    if name == "SCLK":
+                        continue
+                    ch_combo.addItem(name)
+                idx = ch_combo.findText(str(ch))
+                if idx >= 0:
+                    ch_combo.setCurrentIndex(idx)
+                self.rule_table.setCellWidget(r, 0, ch_combo)
+
+                edge_spin = QSpinBox()
+                edge_spin.setRange(0, 4096)
+                try:
+                    edge_spin.setValue(int(edge))
+                except (TypeError, ValueError):
+                    edge_spin.setValue(0)
+                self.rule_table.setCellWidget(r, 1, edge_spin)
+
+                level_combo = QComboBox()
+                level_combo.addItems(["高", "低"])
+                idx_lv = level_combo.findText(str(level))
+                if idx_lv >= 0:
+                    level_combo.setCurrentIndex(idx_lv)
+                self.rule_table.setCellWidget(r, 2, level_combo)
+
+                width_spin = QSpinBox()
+                width_spin.setRange(0, 4096)
+                try:
+                    width_spin.setValue(int(width))
+                except (TypeError, ValueError):
+                    width_spin.setValue(0)
+                width_spin.setToolTip("0=永久保持；N=从触发点起持续N个CLK周期(1CLK周期=2采样点)")
+                self.rule_table.setCellWidget(r, 3, width_spin)
+
+                btn = QPushButton("删除")
+                btn.clicked.connect(lambda checked, rr=r: self._remove_rule(rr))
+                self.rule_table.setCellWidget(r, 4, btn)
+
+            self._save_rules()
+            self.log_signal.emit(f"[INFO] 从Excel导入了 {self.rule_table.rowCount()} 条时序规则")
+            QMessageBox.information(self, "导入成功",
+                f"已导入 {self.rule_table.rowCount()} 条时序规则，可二次编辑。")
+
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败",
+                f"读取规则 Excel 时出错:\n{str(e)}")
+            self.log_signal.emit(f"[ERROR] 规则 Excel 导入失败: {e}")
 
     # ============================================================
     # Protocol

@@ -13,7 +13,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QSpinBox, QDoubleSpinBox, QGroupBox, QMessageBox, QCheckBox,
-    QSplitter,
+    QSplitter, QFileDialog, QLineEdit,
 )
 
 from comm.protocol import build_adc_config, build_adc_burst, parse_adc_data
@@ -53,6 +53,11 @@ class AdcPanel(QWidget):
         self._adc_offset = 0.0   # loaded from config
         self._lock = threading.Lock()
         self._offset_spins = []
+        self._name_edits = []
+        self._name_labels = []
+
+        self._burst_seq = 0       # monotonically increasing burst serial
+        self._burst_seq_ack = 0   # which seq we are currently collecting
 
         self._burst_pending  = False
         self._burst_expect   = 0
@@ -130,6 +135,10 @@ class AdcPanel(QWidget):
             "font-weight: bold; min-height: 32px; font-size: 14px;")
         self.btn_go.clicked.connect(self._on_go)
         cfg.addWidget(self.btn_go)
+        self.btn_save_as = QPushButton("另存为Excel")
+        self.btn_save_as.setToolTip("将当前波形保存为时间戳文件，不会被下次采集覆盖")
+        self.btn_save_as.clicked.connect(self._export_excel_as)
+        cfg.addWidget(self.btn_save_as)
         outer.addLayout(cfg)
 
         # ── ADC 电压修正 ─────────────────────────────────────
@@ -150,6 +159,23 @@ class AdcPanel(QWidget):
         outer.addLayout(corr_row)
 
         # ── Offset row ────────────────────────────────────────
+        # ---- Name row ----
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("波形名:"))
+        self._name_edits = []
+        for i in range(NUM_CH):
+            color = CH_COLORS[i]
+            lbl = QLabel(CH_NAMES[i])
+            lbl.setStyleSheet("color: rgb(" + str(color[0]) + "," + str(color[1]) + "," + str(color[2]) + "); font-weight: bold")
+            name_row.addWidget(lbl)
+            edit = QLineEdit(CH_NAMES[i])
+            edit.setMaximumWidth(90)
+            edit.textChanged.connect(lambda text, ii=i: self._on_name_changed(ii, text))
+            name_row.addWidget(edit)
+            self._name_edits.append(edit)
+        name_row.addStretch()
+        outer.addLayout(name_row)
+
         off_row = QHBoxLayout()
         off_row.addWidget(QLabel("偏移(V):"))
         self._offset_spins = []
@@ -169,9 +195,19 @@ class AdcPanel(QWidget):
         off_row.addStretch()
         outer.addLayout(off_row)
 
+        # ---- Action row: status + reset button ----
+        action_row = QHBoxLayout()
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setStyleSheet("color: gray;")
-        outer.addWidget(self.lbl_status)
+        action_row.addWidget(self.lbl_status)
+
+        action_row.addStretch()
+
+        self.btn_reset = QPushButton("重置ADC波形")
+        self.btn_reset.setToolTip("清空所有波形数据并重置采集状态")
+        self.btn_reset.clicked.connect(self._on_reset)
+        action_row.addWidget(self.btn_reset)
+        outer.addLayout(action_row)
 
         # ── 3 linked plots (stacked vertically, X-linked) ─────
         self._plots  = []
@@ -187,6 +223,16 @@ class AdcPanel(QWidget):
 
             pen = pg.mkPen(color=CH_COLORS[i], width=1.5)
             curve = pw.plot(pen=pen, name=CH_NAMES[i])
+
+            txt = pg.TextItem(
+                text=CH_NAMES[i],
+                color=color,
+                anchor=(0, 0.5),
+                fill=pg.mkColor(0, 0, 0, 160),
+            )
+            txt.setZValue(10)
+            pw.addItem(txt)
+            self._name_labels.append(txt)
 
             self._plots.append(pw)
             self._curves.append(curve)
@@ -223,6 +269,12 @@ class AdcPanel(QWidget):
     # Burst capture
     # ----------------------------------------------------------------
 
+    def _on_name_changed(self, idx, text):
+        if idx < len(self._plots):
+            self._plots[idx].setLabel("left", text, units="V")
+        if idx < len(self._name_labels):
+            self._name_labels[idx].setText(text)
+
     def _on_go(self):
         if not self.link.is_open():
             QMessageBox.warning(self, "未连接", "请先连接串口。")
@@ -242,6 +294,11 @@ class AdcPanel(QWidget):
         with self._lock:
             for b in self._buffers:
                 b.clear()
+
+        # Bump burst serial before _send_burst (50 ms later) to reject any
+        # stale frame that arrives in the window - root cause of freeze #1.
+        self._burst_seq += 1
+        self._burst_seq_ack = self._burst_seq
 
         self._burst_pending  = True
         self._burst_expect   = ns * num_ch
@@ -267,6 +324,20 @@ class AdcPanel(QWidget):
             f"[TX] BURST ch=0x{mask:02X} n={ns} "
             f"rate={self.sb_rate.value()}Hz")
 
+    def _on_reset(self):
+        """Clear all waveform data, reset burst state, and clear the plots."""
+        self._burst_pending = False
+        self._burst_seq_ack = 0
+        self.btn_go.setEnabled(True)
+        with self._lock:
+            for b in self._buffers:
+                b.clear()
+        for curve in self._curves:
+            curve.setData([], [])
+        self.lbl_status.setText("已重置")
+        self.lbl_status.setStyleSheet("color: gray;")
+        self.log_signal.emit("[INFO] ADC波形已重置")
+
     # ----------------------------------------------------------------
     # Frame handler
     # ----------------------------------------------------------------
@@ -290,6 +361,11 @@ class AdcPanel(QWidget):
             reshaped = samples.reshape(scan_periods, num_en)
 
             if self._burst_pending and ch_mask == self._burst_ch_mask:
+                # Seq guard: reject frames belonging to a previous burst
+                # that arrived before _send_burst fired.
+                if self._burst_seq != self._burst_seq_ack:
+                    return
+
                 buf = self._burst_buf
                 for c in range(num_en):
                     buf[c].append(reshaped[:, c].copy())
@@ -330,25 +406,45 @@ class AdcPanel(QWidget):
         log_dir = r"D:\test\STM32H723ZGT6\host\adc_logs"
         os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(log_dir, f"adc_{ts}.xlsx")
+        path = os.path.join(log_dir, "adc_latest.xlsx")
 
+        self._save_excel_to(path)
+        self.log_signal.emit(f"[INFO] Excel已保存: {path}")
+
+    def _export_excel_as(self):
+        """Save current waveform to a timestamped file (will NOT be overwritten)."""
+        log_dir = r"D:/test/STM32H723ZGT6/host/adc_logs"
+        os.makedirs(log_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"adc_{ts}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "另存为", os.path.join(log_dir, default_name),
+            "Excel (*.xlsx)")
+        if not path:
+            return
+        self._save_excel_to(path)
+
+    def _save_excel_to(self, path):
+        """Write current ADC buffer to an Excel file at the given path (shared logic)."""
+        ch_map = self._burst_ch_map
+        if not ch_map:
+            self.log_signal.emit("[WARN] 没有可导出的波形数据")
+            return
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "ADC"
-        ch_map = self._burst_ch_map
         active_pins = [CH_PINS[i] for i in ch_map]
         headers = ["样本序号"] + [f"{p} 电压(V)" for p in active_pins]
         for ci, h in enumerate(headers, 1):
             ws.cell(row=1, column=ci, value=h)
-
-        spc = min(len(self._buffers[i]) if i in ch_map else 0
-                   for i in ch_map)
+        with self._lock:
+            bufs = [list(b) for b in self._buffers]
+        spc = min(len(bufs[i]) if i in ch_map else 0 for i in ch_map)
         for r in range(spc):
             ws.cell(row=r + 2, column=1, value=r)
-            for c, phys in enumerate(ch_map):
-                raw = (self._buffers[phys][r]
-                       if r < len(self._buffers[phys]) else 0)
-                ws.cell(row=r + 2, column=c + 2,
+            for ci, phys in enumerate(ch_map):
+                raw = bufs[phys][r] if r < len(bufs[phys]) else 0
+                ws.cell(row=r + 2, column=ci + 2,
                         value=round(raw * ADC_VREF / ADC_MAX - self._adc_offset, 4))
         wb.save(path)
         self.log_signal.emit(f"[INFO] Excel已保存: {path}")
@@ -371,6 +467,10 @@ class AdcPanel(QWidget):
             n = len(volts)
             offset = (self._offset_spins[i].value()
                       if i < len(self._offset_spins) else 0.0)
+
+            if i < len(self._name_labels):
+                first_val = volts[0] + offset if n > 0 else offset
+                self._name_labels[i].setPos(0, first_val)
 
             if n > 8000:
                 bs = max(n // 4000, 2)
