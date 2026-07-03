@@ -25,7 +25,8 @@ from comm.protocol import (
 )
 from comm.serial_link import SerialLink
 
-_RULES_PATH = os.path.join(os.path.expanduser("~"), ".h723_wave_rules.json")
+_TEMPLATES_PATH = os.path.join(os.path.expanduser("~"), ".h723_wave_templates.json")
+_CURRENT_KEY = "__current__"
 
 CH_NAMES = ["XYNC", "SCLK", "SH_R", "SH_S", "RST"]
 CH_PINS = ["PA0", "PA1", "PA2", "PA3", "PA5"]
@@ -189,6 +190,22 @@ class WavePanel(QWidget):
         btn_layout.addStretch()
         rule_inner.addLayout(btn_layout)
 
+        # Template row
+        tmpl_row = QHBoxLayout()
+        tmpl_row.addWidget(QLabel("模板:"))
+        self.cb_template = QComboBox()
+        self.cb_template.setMinimumWidth(120)
+        self.cb_template.activated.connect(self._on_template_selected)
+        tmpl_row.addWidget(self.cb_template)
+        self.btn_save_template = QPushButton("保存为模板")
+        self.btn_save_template.clicked.connect(self._save_template)
+        tmpl_row.addWidget(self.btn_save_template)
+        self.btn_delete_template = QPushButton("删除模板")
+        self.btn_delete_template.clicked.connect(self._delete_template)
+        tmpl_row.addWidget(self.btn_delete_template)
+        tmpl_row.addStretch()
+        rule_inner.addLayout(tmpl_row)
+
         ctrl_layout.addWidget(rule_box, stretch=1)
 
         # --- 3. Playback ---
@@ -221,12 +238,12 @@ class WavePanel(QWidget):
         plot_outer.setContentsMargins(4, 4, 4, 4)
         plot_outer.setSpacing(2)
 
-        # Left panel: offsets + CLK toggle
+        # Left panel: offsets + CLK toggle (name on top, spin below)
         left_plot_panel = QWidget()
-        left_plot_panel.setFixedWidth(110)
+        left_plot_panel.setFixedWidth(120)
         left_plot_layout = QVBoxLayout(left_plot_panel)
         left_plot_layout.setContentsMargins(2, 2, 2, 2)
-        left_plot_layout.setSpacing(4)
+        left_plot_layout.setSpacing(2)
 
         # CLK markers toggle
         self.cb_show_clk = QCheckBox("CLK虚线")
@@ -234,23 +251,29 @@ class WavePanel(QWidget):
         self.cb_show_clk.stateChanged.connect(self._on_clk_visibility_changed)
         left_plot_layout.addWidget(self.cb_show_clk)
 
-        # Offset controls
+        left_plot_layout.addSpacing(6)
+
+        # Offset controls: name label on top, spinbox below, per channel
         for i in range(5):
-            row_off = QHBoxLayout()
             color = CH_COLORS[i]
-            lbl = QLabel(f"<font color='rgb{color}'>{CH_NAMES[i]}</font>")
-            lbl.setFixedWidth(32)
-            row_off.addWidget(lbl)
+            namelbl = QLabel(f"<font color='rgb{color}'><b>{CH_NAMES[i]}</b></font>")
+            namelbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            left_plot_layout.addWidget(namelbl)
             spin = QDoubleSpinBox()
             spin.setRange(-3.0, 3.0)
             spin.setSingleStep(0.1)
             spin.setValue(0.0)
             spin.setDecimals(1)
-            spin.setFixedWidth(50)
+            spin.setFixedWidth(90)
             spin.valueChanged.connect(self._schedule_plot_update)
-            row_off.addWidget(spin)
+            row_spin = QHBoxLayout()
+            row_spin.addStretch()
+            row_spin.addWidget(spin)
+            row_spin.addStretch()
+            left_plot_layout.addLayout(row_spin)
             self._offset_spins.append(spin)
-            left_plot_layout.addLayout(row_off)
+            if i < 4:
+                left_plot_layout.addSpacing(4)
 
         left_plot_layout.addStretch()
         plot_outer.addWidget(left_plot_panel)
@@ -259,9 +282,9 @@ class WavePanel(QWidget):
         self.plot_widget.setLabel("bottom", "采样点序号")
         self.plot_widget.setLabel("left", "通道")
         self.plot_widget.showGrid(x=True, y=True)
-        self.plot_widget.setYRange(-0.2, 5.0, padding=0.0)
+        self.plot_widget.setYRange(-0.5, 7.0, padding=0.0)
         self.plot_widget.getAxis("left").setTicks([
-            [(i + 0.4, CH_NAMES[4 - i]) for i in range(5)]
+            [(i * 1.5 + 0.4, CH_NAMES[4 - i]) for i in range(5)]
         ])
         self.plot_widget.getViewBox().setMouseMode(pg.ViewBox.PanMode)
 
@@ -520,8 +543,8 @@ class WavePanel(QWidget):
         ch_combo.currentTextChanged.connect(self._save_rules)
         self.rule_table.setCellWidget(row, 0, ch_combo)
         edge_spin = QSpinBox()
-        edge_spin.setRange(1, 4096)
-        edge_spin.setValue(1)
+        edge_spin.setRange(0, 4096)
+        edge_spin.setValue(0)
         edge_spin.valueChanged.connect(self._save_rules)
         self.rule_table.setCellWidget(row, 1, edge_spin)
         level_combo = QComboBox()
@@ -551,11 +574,12 @@ class WavePanel(QWidget):
         return CH_NAMES.index(name)
 
     def _edge_to_sample(self, edge_num):
+        """0-based: edge 0 = first active CLK edge, edge 1 = second, etc."""
         initial_high = self.cb_sclk_init.currentText() == "高"
         falling_edge = self.cb_sclk_edge.currentText() == "下降沿"
         match = (initial_high and falling_edge) or (not initial_high and not falling_edge)
         if match:
-            return 2 * edge_num - 1
+            return 2 * edge_num + 1
         else:
             return 2 * edge_num
 
@@ -684,15 +708,15 @@ class WavePanel(QWidget):
 
         for i in range(len(self._clk_lines)):
             if i < needed:
-                edge_num = i + 1
+                edge_num = i  # 0-based
                 if match:
-                    sample_idx = 2 * edge_num - 1
+                    sample_idx = 2 * edge_num + 1
                 else:
                     sample_idx = 2 * edge_num
                 self._clk_lines[i].setPos(sample_idx)
                 self._clk_lines[i].show()
                 self._clk_texts[i].setText(str(edge_num))
-                self._clk_texts[i].setPos(sample_idx, 5.0)
+                self._clk_texts[i].setPos(sample_idx, 7.0)
                 self._clk_texts[i].show()
             else:
                 self._clk_lines[i].hide()
@@ -700,7 +724,7 @@ class WavePanel(QWidget):
 
         # --- Update curve data ---
         for c in range(NUM_CH):
-            y_base = 4 - c
+            y_base = (4 - c) * 1.5
             offset = self._offset_spins[c].value() if c < len(self._offset_spins) else 0.0
             x, y = self._stair_step(ch_states[c], y_base, offset)
             self._curves[c].setData(x, y)
@@ -981,11 +1005,11 @@ class WavePanel(QWidget):
                 self.log_signal.emit(f"[RX] 确认 {cmd_name} {ok}")
 
     # ============================================================
-    # Rule persistence
+    # Rule + Template persistence
     # ============================================================
 
-    def _save_rules(self):
-        """Save rules, initial states, and SCLK config to disk."""
+    def _gather_rules_data(self):
+        """Collect current SCLK config + initial states + rules into a dict."""
         data = {}
         data["sclk_init"] = self.cb_sclk_init.currentText()
         data["sclk_edge"] = self.cb_sclk_edge.currentText()
@@ -1009,33 +1033,60 @@ class WavePanel(QWidget):
                 "width": width_widget.value() if width_widget else 0,
             })
         data["rules"] = rules
+        return data
+
+    def _load_templates_db(self):
+        if not os.path.exists(_TEMPLATES_PATH):
+            return {}
         try:
-            with open(_RULES_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            with open(_TEMPLATES_PATH, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            return db if isinstance(db, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_templates_db(self, db):
+        try:
+            with open(_TEMPLATES_PATH, "w", encoding="utf-8") as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    def _load_rules(self):
-        """Restore rules, initial states, and SCLK config from disk."""
-        if not os.path.exists(_RULES_PATH):
-            return
-        try:
-            with open(_RULES_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return
+    def _save_rules(self):
+        """Auto-save current editor state to __current__ slot."""
+        db = self._load_templates_db()
+        db[_CURRENT_KEY] = self._gather_rules_data()
+        self._save_templates_db(db)
+
+    def _apply_rules_data(self, data):
+        """Populate editor UI from a rules data dict."""
+        # SCLK config
         if "sclk_init" in data:
             idx = self.cb_sclk_init.findText(data["sclk_init"])
-            if idx >= 0: self.cb_sclk_init.setCurrentIndex(idx)
+            if idx >= 0:
+                self.cb_sclk_init.blockSignals(True)
+                self.cb_sclk_init.setCurrentIndex(idx)
+                self.cb_sclk_init.blockSignals(False)
         if "sclk_edge" in data:
             idx = self.cb_sclk_edge.findText(data["sclk_edge"])
-            if idx >= 0: self.cb_sclk_edge.setCurrentIndex(idx)
+            if idx >= 0:
+                self.cb_sclk_edge.blockSignals(True)
+                self.cb_sclk_edge.setCurrentIndex(idx)
+                self.cb_sclk_edge.blockSignals(False)
         if "sclk_cutoff" in data:
+            self.sb_sclk_cutoff.blockSignals(True)
             self.sb_sclk_cutoff.setValue(data["sclk_cutoff"])
+            self.sb_sclk_cutoff.blockSignals(False)
+        # Initial states
         if "initial_states" in data:
             initial = data["initial_states"]
             for i, chk in self._initial_checks:
+                chk.blockSignals(True)
                 chk.setChecked(initial.get(str(i), False))
+                chk.blockSignals(False)
+        # Clear existing rules
+        self.rule_table.setRowCount(0)
+        # Load rules
         if "rules" in data:
             for rule in data["rules"]:
                 row = self.rule_table.rowCount()
@@ -1049,8 +1100,8 @@ class WavePanel(QWidget):
                 ch_combo.currentTextChanged.connect(self._save_rules)
                 self.rule_table.setCellWidget(row, 0, ch_combo)
                 edge_spin = QSpinBox()
-                edge_spin.setRange(1, 4096)
-                edge_spin.setValue(rule.get("edge", 1))
+                edge_spin.setRange(0, 4096)
+                edge_spin.setValue(rule.get("edge", 0))
                 edge_spin.valueChanged.connect(self._save_rules)
                 self.rule_table.setCellWidget(row, 1, edge_spin)
                 level_combo = QComboBox()
@@ -1067,3 +1118,97 @@ class WavePanel(QWidget):
                 btn = QPushButton("删除")
                 btn.clicked.connect(lambda checked, r=row: self._remove_rule(r))
                 self.rule_table.setCellWidget(row, 4, btn)
+
+    def _load_rules(self):
+        """Restore __current__ editor state on startup."""
+        db = self._load_templates_db()
+        self._refresh_template_list(db)
+        data = db.get(_CURRENT_KEY, {})
+        if data:
+            self._apply_rules_data(data)
+
+    def _refresh_template_list(self, db=None):
+        if db is None:
+            db = self._load_templates_db()
+        self.cb_template.blockSignals(True)
+        self.cb_template.clear()
+        self.cb_template.addItem("（当前编辑）")
+        names = sorted(k for k in db.keys() if k != _CURRENT_KEY)
+        self.cb_template.addItems(names)
+        self.cb_template.setCurrentIndex(0)
+        self.cb_template.blockSignals(False)
+
+    def _on_template_selected(self, index):
+        name = self.cb_template.itemText(index)
+        if index == 0 or not name:
+            return  # "（当前编辑）"
+        db = self._load_templates_db()
+        data = db.get(name)
+        if not data:
+            return
+        reply = QMessageBox.question(
+            self, "加载模板",
+            f"将用模板 '{name}' 替换当前编辑器内容，继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.cb_template.setCurrentIndex(0)
+            return
+        self._apply_rules_data(data)
+        self._save_rules()  # persist as __current__
+        self._schedule_plot_update()
+        self.log_signal.emit(f"[INFO] 已加载模板 '{name}'")
+
+    def _save_template(self):
+        db = self._load_templates_db()
+        current_name = self.cb_template.currentText().strip()
+        exists = current_name and current_name != "（当前编辑）" and current_name in db
+
+        from PyQt6.QtWidgets import QInputDialog
+        if exists:
+            # Offer: overwrite current or save as new
+            btn = QMessageBox.question(
+                self, "保存模板",
+                f"模板 '{current_name}' 已存在。\n"
+                f"覆盖 '{current_name}' 请选 [Yes]\n"
+                f"另存为新名称请选 [No]",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if btn == QMessageBox.StandardButton.Cancel:
+                return
+            if btn == QMessageBox.StandardButton.No:
+                current_name = ""
+        if not current_name:
+            name, ok = QInputDialog.getText(
+                self, "保存模板", "模板名称:")
+            if not ok or not name or not name.strip():
+                return
+            current_name = name.strip()
+
+        db[current_name] = self._gather_rules_data()
+        self._save_templates_db(db)
+        self._refresh_template_list(db)
+        self.cb_template.setCurrentText(current_name)
+        self.log_signal.emit(f"[INFO] 模板 '{current_name}' 已保存")
+
+    def _delete_template(self):
+        name = self.cb_template.currentText().strip()
+        if not name or name == "（当前编辑）":
+            return
+        db = self._load_templates_db()
+        if name not in db:
+            return
+        reply = QMessageBox.question(
+            self, "删除模板",
+            f"确认删除模板 '{name}' ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        del db[name]
+        self._save_templates_db(db)
+        self._refresh_template_list(db)
+        self.log_signal.emit(f"[INFO] 模板 '{name}' 已删除")
