@@ -273,6 +273,19 @@ class WavePanel(QWidget):
         self.cb_show_clk.stateChanged.connect(self._on_clk_visibility_changed)
         left_plot_layout.addWidget(self.cb_show_clk)
 
+        left_plot_layout.addSpacing(4)
+
+        # Display period control
+        period_row = QHBoxLayout()
+        period_row.addWidget(QLabel("显示周期:"))
+        self.sb_display_period = QSpinBox()
+        self.sb_display_period.setRange(1, 100)
+        self.sb_display_period.setValue(1)
+        self.sb_display_period.setToolTip("1=1个完整周期; N=重复显示N个周期")
+        self.sb_display_period.valueChanged.connect(self._schedule_plot_update)
+        period_row.addWidget(self.sb_display_period)
+        left_plot_layout.addLayout(period_row)
+
         left_plot_layout.addSpacing(6)
 
         # Offset controls: name label on top, spinbox below, per channel
@@ -713,6 +726,9 @@ class WavePanel(QWidget):
             self._clear_clk_markers()
             return
 
+        period = max(1, self.sb_display_period.value())
+        total_n = n * period
+
         ch_states = []
         for c in range(NUM_CH):
             arr = np.array([
@@ -721,6 +737,8 @@ class WavePanel(QWidget):
                 else 0
                 for r in range(n)
             ], dtype=np.uint8)
+            if period > 1:
+                arr = np.tile(arr, period)
             ch_states.append(arr)
 
         # --- CLK markers (toggle via _show_clk_markers) ---
@@ -729,7 +747,7 @@ class WavePanel(QWidget):
         match = (initial_high and falling_edge) or (not initial_high and not falling_edge)
 
         max_edge = n // 2
-        needed = max_edge if self._show_clk_markers else 0
+        needed = max_edge * period if self._show_clk_markers else 0
 
         while len(self._clk_lines) < needed:
             line = pg.InfiniteLine(
@@ -745,11 +763,12 @@ class WavePanel(QWidget):
 
         for i in range(len(self._clk_lines)):
             if i < needed:
-                edge_num = i  # 0-based
+                edge_num = i % max_edge          # same label each period
+                period_idx = i // max_edge       # which repetition
                 if match:
-                    sample_idx = 2 * edge_num + 1
+                    sample_idx = 2 * edge_num + 1 + period_idx * n
                 else:
-                    sample_idx = 2 * edge_num
+                    sample_idx = 2 * edge_num + period_idx * n
                 self._clk_lines[i].setPos(sample_idx)
                 self._clk_lines[i].show()
                 self._clk_texts[i].setText(str(edge_num))
@@ -770,7 +789,7 @@ class WavePanel(QWidget):
                 first_y = y[0] if len(y) > 0 else y_base + offset
                 self._name_labels[c].setPos(0, first_y)
 
-        self.plot_widget.setXRange(0, n, padding=0.02)
+        self.plot_widget.setXRange(0, total_n, padding=0.02)
 
 
     def _clear_clk_markers(self):
