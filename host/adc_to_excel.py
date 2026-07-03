@@ -25,7 +25,6 @@ from comm.protocol import (
 
 ADC_VREF   = 3.3
 ADC_MAX    = 4095.0
-ADC_OFFSET = 0.055   # voltage correction (V)
 CH_PINS    = ["PA6", "PA7", "PC4"]
 
 
@@ -40,6 +39,8 @@ def main():
                         help="Samples per channel (default 1000)")
     parser.add_argument("--output", default="",
                         help="Output .xlsx path (default: auto-timestamp)")
+    parser.add_argument("--offset", type=float, default=0.0,
+                        help="ADC voltage offset correction (default 0.0)")
     args = parser.parse_args()
 
     ch_mask = 0x01  # PA6 always on
@@ -140,7 +141,7 @@ def main():
         for c in range(num_ch):
             ws.cell(row=r + 2, column=c + 2,
                     value=round(ch_buffers[c][r] * ADC_VREF / ADC_MAX
-                                - ADC_OFFSET, 4))
+                                - args.offset, 4))
 
     wb.save(out_path)
     print(f"[OK]  Saved: {out_path}  "

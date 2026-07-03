@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """ADC multi-channel burst capture — 3 linked X axes, independent Y axes."""
 
+import json
 import os
 import threading
 from datetime import datetime
@@ -24,8 +25,8 @@ CH_PINS    = ["PA6", "PA7", "PC4"]
 CH_NAMES   = ["PA6", "PA7", "PC4"]
 ADC_VREF   = 3.3
 ADC_MAX    = 4095.0
-ADC_OFFSET = 0.055   # voltage correction (V)
 NUM_CH     = 3
+_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".h723_adc_config.json")
 
 
 class AdcViewBox(pg.ViewBox):
@@ -49,6 +50,7 @@ class AdcPanel(QWidget):
         super().__init__(parent)
         self.link = link
         self._sample_rate = 20000
+        self._adc_offset = 0.0   # loaded from config
         self._lock = threading.Lock()
         self._offset_spins = []
 
@@ -62,10 +64,37 @@ class AdcPanel(QWidget):
         self._buffers = [[] for _ in range(NUM_CH)]
 
         self._setup_ui()
+        self._load_config()
 
         self._plot_timer = QTimer(self)
         self._plot_timer.timeout.connect(self._update_plot)
         self._plot_timer.start(100)
+
+    # ----------------------------------------------------------------
+    # Config persistence
+    # ----------------------------------------------------------------
+
+    def _load_config(self):
+        try:
+            if os.path.exists(_CONFIG_PATH):
+                with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                self._adc_offset = float(cfg.get("adc_offset_v", 0.0))
+                self.sb_adc_offset.blockSignals(True)
+                self.sb_adc_offset.setValue(self._adc_offset)
+                self.sb_adc_offset.blockSignals(False)
+        except Exception:
+            self._adc_offset = 0.0
+
+    def _save_offset(self):
+        try:
+            cfg = {"adc_offset_v": self._adc_offset}
+            with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            self.log_signal.emit(
+                f"[INFO] ADC修正已保存: {self._adc_offset:+.3f}V")
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", str(e))
 
     def _setup_ui(self):
         outer = QVBoxLayout(self)
@@ -102,6 +131,23 @@ class AdcPanel(QWidget):
         self.btn_go.clicked.connect(self._on_go)
         cfg.addWidget(self.btn_go)
         outer.addLayout(cfg)
+
+        # ── ADC 电压修正 ─────────────────────────────────────
+        corr_row = QHBoxLayout()
+        corr_row.addWidget(QLabel("ADC修正(V):"))
+        self.sb_adc_offset = QDoubleSpinBox()
+        self.sb_adc_offset.setRange(-1.0, 1.0)
+        self.sb_adc_offset.setSingleStep(0.001)
+        self.sb_adc_offset.setDecimals(3)
+        self.sb_adc_offset.setValue(self._adc_offset)
+        self.sb_adc_offset.setFixedWidth(100)
+        self.sb_adc_offset.valueChanged.connect(lambda v: setattr(self, '_adc_offset', v))
+        corr_row.addWidget(self.sb_adc_offset)
+        self.btn_save_offset = QPushButton("保存修正")
+        self.btn_save_offset.clicked.connect(self._save_offset)
+        corr_row.addWidget(self.btn_save_offset)
+        corr_row.addStretch()
+        outer.addLayout(corr_row)
 
         # ── Offset row ────────────────────────────────────────
         off_row = QHBoxLayout()
@@ -303,7 +349,7 @@ class AdcPanel(QWidget):
                 raw = (self._buffers[phys][r]
                        if r < len(self._buffers[phys]) else 0)
                 ws.cell(row=r + 2, column=c + 2,
-                        value=round(raw * ADC_VREF / ADC_MAX - ADC_OFFSET, 4))
+                        value=round(raw * ADC_VREF / ADC_MAX - self._adc_offset, 4))
         wb.save(path)
         self.log_signal.emit(f"[INFO] Excel已保存: {path}")
 
@@ -321,7 +367,7 @@ class AdcPanel(QWidget):
                 self._curves[i].setData([], [])
                 continue
             arr = np.array(buf, dtype=np.float32)
-            volts = arr * ADC_VREF / ADC_MAX - ADC_OFFSET  # ← corrected
+            volts = arr * ADC_VREF / ADC_MAX - self._adc_offset  # ← corrected
             n = len(volts)
             offset = (self._offset_spins[i].value()
                       if i < len(self._offset_spins) else 0.0)
