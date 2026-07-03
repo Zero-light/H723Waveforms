@@ -218,6 +218,8 @@ class AdcPanel(QWidget):
         for i in range(NUM_CH):
             pw = pg.PlotWidget(viewBox=AdcViewBox())
             pw.setLabel("left", CH_NAMES[i], units="V")
+            pw.getAxis("left").setPen(color)
+            pw.getAxis("left").setTextPen(color)
             pw.setYRange(0, 4, padding=0)
             pw.showGrid(x=True, y=True)
 
@@ -230,6 +232,7 @@ class AdcPanel(QWidget):
                 anchor=(0, 0.5),
                 fill=pg.mkColor(0, 0, 0, 160),
             )
+            txt.setFont(QFont("", 11))
             txt.setZValue(10)
             pw.addItem(txt)
             self._name_labels.append(txt)
@@ -470,7 +473,7 @@ class AdcPanel(QWidget):
 
             if i < len(self._name_labels):
                 first_val = volts[0] + offset if n > 0 else offset
-                self._name_labels[i].setPos(0, first_val)
+                self._name_labels[i].setPos(5, first_val)
 
             if n > 8000:
                 bs = max(n // 4000, 2)
