@@ -57,7 +57,7 @@ class WavePanel(QWidget):
         self._name_labels: List[pg.TextItem] = []
 
         # CLK markers visibility flag
-        self._last_ie_dir = "D:/test/STM32H723ZGT6/host/dist/wavrforms_truth"
+        self._last_ie_dir = "D:/project/q4/reg"
         self._show_clk_markers = True
 
         # Debounce for plot updates
@@ -964,6 +964,22 @@ class WavePanel(QWidget):
             ws2.cell(row=i + 2, column=1, value=ch)
             ws2.cell(row=i + 2, column=2, value=init_states.get(ch, "低"))
 
+        # Waveform config in a third sheet
+        ws3 = wb.create_sheet(title="波形配置")
+        ws3.cell(row=1, column=1, value="参数")
+        ws3.cell(row=1, column=2, value="值")
+        config_items = [
+            ("采样率(Hz)", data.get("wave_rate", "")),
+            ("点数", data.get("wave_points", "")),
+            ("掩码", data.get("wave_chmask", "")),
+            ("SCLK初始", data.get("sclk_init", "")),
+            ("有效边沿", data.get("sclk_edge", "")),
+            ("CLK截止", data.get("sclk_cutoff", "")),
+        ]
+        for i, (param, val) in enumerate(config_items):
+            ws3.cell(row=i+2, column=1, value=param)
+            ws3.cell(row=i+2, column=2, value=str(val) if val else "")
+
         wb.save(path)
         self.log_signal.emit(f"[INFO] 时序规则已导出到 {path}")
         QMessageBox.information(self, "导出成功",
@@ -1040,6 +1056,32 @@ class WavePanel(QWidget):
                 btn = QPushButton("删除")
                 btn.clicked.connect(lambda checked, rr=r: self._remove_rule(rr))
                 self.rule_table.setCellWidget(r, 4, btn)
+
+            # Read waveform config from sheet 3 (if available)
+            if len(wb.sheetnames) >= 3:
+                ws3 = wb[wb.sheetnames[2]]
+                for row in range(2, ws3.max_row + 1):
+                    param = ws3.cell(row=row, column=1).value
+                    val = ws3.cell(row=row, column=2).value
+                    if param and val is not None:
+                        if "采样率(Hz)" in str(param):
+                            try: self.sb_rate.setValue(int(val))
+                            except: pass
+                        elif "点数" in str(param):
+                            try: self.sb_points.setValue(int(val))
+                            except: pass
+                        elif "掩码" in str(param):
+                            try: self.sb_chmask.setValue(int(val))
+                            except: pass
+                        elif "SCLK" in str(param):
+                            idx_find = self.cb_sclk_init.findText(str(val))
+                            if idx_find >= 0: self.cb_sclk_init.setCurrentIndex(idx_find)
+                        elif "边沿" in str(param):
+                            idx_find = self.cb_sclk_edge.findText(str(val))
+                            if idx_find >= 0: self.cb_sclk_edge.setCurrentIndex(idx_find)
+                        elif "CLK截止" in str(param):
+                            try: self.sb_sclk_cutoff.setValue(int(val))
+                            except: pass
 
             self._save_rules()
             self.log_signal.emit(f"[INFO] 从Excel导入了 {self.rule_table.rowCount()} 条时序规则")
@@ -1186,6 +1228,9 @@ class WavePanel(QWidget):
         data["sclk_init"] = self.cb_sclk_init.currentText()
         data["sclk_edge"] = self.cb_sclk_edge.currentText()
         data["sclk_cutoff"] = self.sb_sclk_cutoff.value()
+        data["wave_rate"] = self.sb_rate.value()
+        data["wave_points"] = self.sb_points.value()
+        data["wave_chmask"] = self.sb_chmask.value()
         initial = {}
         for i, chk in self._initial_checks:
             initial[str(i)] = chk.isChecked()
@@ -1249,6 +1294,12 @@ class WavePanel(QWidget):
             self.sb_sclk_cutoff.blockSignals(True)
             self.sb_sclk_cutoff.setValue(data["sclk_cutoff"])
             self.sb_sclk_cutoff.blockSignals(False)
+        if "wave_rate" in data:
+            self.sb_rate.setValue(data["wave_rate"])
+        if "wave_points" in data:
+            self.sb_points.setValue(data["wave_points"])
+        if "wave_chmask" in data:
+            self.sb_chmask.setValue(data["wave_chmask"])
         # Initial states
         if "initial_states" in data:
             initial = data["initial_states"]

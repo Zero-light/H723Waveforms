@@ -81,26 +81,74 @@ class AdcPanel(QWidget):
     # ----------------------------------------------------------------
 
     def _load_config(self):
+        """Load all persisted ADC settings from config file."""
         try:
             if os.path.exists(_CONFIG_PATH):
                 with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                self._adc_offset = float(cfg.get("adc_offset_v", 0.0))
-                self.sb_adc_offset.blockSignals(True)
-                self.sb_adc_offset.setValue(self._adc_offset)
-                self.sb_adc_offset.blockSignals(False)
+            else:
+                cfg = {}
         except Exception:
-            self._adc_offset = 0.0
+            cfg = {}
 
-    def _save_offset(self):
+        # ADC voltage correction
+        self._adc_offset = float(cfg.get("adc_offset_v", 0.0))
+        self.sb_adc_offset.blockSignals(True)
+        self.sb_adc_offset.setValue(self._adc_offset)
+        self.sb_adc_offset.blockSignals(False)
+
+        # Sample rate
+        rate = cfg.get("sample_rate", 20000)
+        self.sb_rate.blockSignals(True)
+        self.sb_rate.setValue(int(rate))
+        self.sb_rate.blockSignals(False)
+
+        # Sample points
+        pts = cfg.get("sample_points", 1000)
+        self.sb_samples.blockSignals(True)
+        self.sb_samples.setValue(int(pts))
+        self.sb_samples.blockSignals(False)
+
+        # Channel enabled
+        enabled = cfg.get("channel_enabled", [True, True, True])
+        for i, chk in enumerate(self._ch_checks):
+            if i < len(enabled):
+                chk.blockSignals(True)
+                chk.setChecked(bool(enabled[i]))
+                chk.blockSignals(False)
+
+        # Channel names
+        names = cfg.get("channel_names", CH_NAMES[:])
+        for i, edit in enumerate(self._name_edits):
+            if i < len(names):
+                edit.blockSignals(True)
+                edit.setText(str(names[i]))
+                edit.blockSignals(False)
+
+        # Channel offsets
+        offsets = cfg.get("channel_offsets", [0.0, 0.0, 0.0])
+        for i, spin in enumerate(self._offset_spins):
+            if i < len(offsets):
+                spin.blockSignals(True)
+                spin.setValue(float(offsets[i]))
+                spin.blockSignals(False)
+
+    def _save_config(self):
+        """Persist all ADC settings to config file."""
         try:
-            cfg = {"adc_offset_v": self._adc_offset}
+            cfg = {
+                "adc_offset_v": self._adc_offset,
+                "sample_rate": self.sb_rate.value(),
+                "sample_points": self.sb_samples.value(),
+                "channel_enabled": [chk.isChecked() for chk in self._ch_checks],
+                "channel_names": [edit.text() for edit in self._name_edits],
+                "channel_offsets": [spin.value() for spin in self._offset_spins],
+            }
             with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-            self.log_signal.emit(
-                f"[INFO] ADC修正已保存: {self._adc_offset:+.3f}V")
+            self.log_signal.emit("[INFO] ADC 配置已自动保存")
         except Exception as e:
-            QMessageBox.warning(self, "保存失败", str(e))
+            pass  # silent fail on auto-save
 
     def _setup_ui(self):
         outer = QVBoxLayout(self)
@@ -113,6 +161,7 @@ class AdcPanel(QWidget):
         self.sb_rate.setRange(1000, 1000000)
         self.sb_rate.setValue(20000)
         self.sb_rate.setSingleStep(1000)
+        self.sb_rate.valueChanged.connect(lambda: self._save_config())
         cfg.addWidget(self.sb_rate)
 
         cfg.addWidget(QLabel("样本数:"))
@@ -120,12 +169,14 @@ class AdcPanel(QWidget):
         self.sb_samples.setRange(100, 16384)
         self.sb_samples.setValue(1000)
         self.sb_samples.setSingleStep(1000)
+        self.sb_samples.valueChanged.connect(lambda: self._save_config())
         cfg.addWidget(self.sb_samples)
 
         self._ch_checks = []
         for i, pin in enumerate(CH_PINS):
             chk = QCheckBox(f"{pin}")
             chk.setChecked(True)
+            chk.stateChanged.connect(lambda: self._save_config())
             self._ch_checks.append(chk)
             cfg.addWidget(chk)
 
@@ -151,10 +202,10 @@ class AdcPanel(QWidget):
         self.sb_adc_offset.setDecimals(3)
         self.sb_adc_offset.setValue(self._adc_offset)
         self.sb_adc_offset.setFixedWidth(100)
-        self.sb_adc_offset.valueChanged.connect(lambda v: setattr(self, '_adc_offset', v))
+        self.sb_adc_offset.valueChanged.connect(lambda v: (setattr(self, '_adc_offset', v), self._save_config()))
         corr_row.addWidget(self.sb_adc_offset)
         self.btn_save_offset = QPushButton("保存修正")
-        self.btn_save_offset.clicked.connect(self._save_offset)
+        self.btn_save_offset.clicked.connect(self._save_config)
         corr_row.addWidget(self.btn_save_offset)
         corr_row.addStretch()
         outer.addLayout(corr_row)
@@ -171,7 +222,7 @@ class AdcPanel(QWidget):
             name_row.addWidget(lbl)
             edit = QLineEdit(CH_NAMES[i])
             edit.setMaximumWidth(90)
-            edit.textChanged.connect(lambda text, ii=i: self._on_name_changed(ii, text))
+            edit.textChanged.connect(lambda text, ii=i: (self._on_name_changed(ii, text), self._save_config()))
             name_row.addWidget(edit)
             self._name_edits.append(edit)
         name_row.addStretch()
@@ -190,7 +241,7 @@ class AdcPanel(QWidget):
             spin.setValue(0.0)
             spin.setDecimals(1)
             spin.setFixedWidth(90)
-            spin.valueChanged.connect(lambda v, i=i: self._schedule_update())
+            spin.valueChanged.connect(lambda v, i=i: (self._schedule_update(), self._save_config()))
             off_row.addWidget(spin)
             self._offset_spins.append(spin)
         off_row.addStretch()
