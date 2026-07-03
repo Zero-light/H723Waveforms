@@ -55,7 +55,7 @@ void APP_ADC_InitDual(uint32_t sample_rate_hz)
     ADC_DMA_Init();
 
     hadc1.Instance = ADC1;
-    hadc1.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV2;  /* 32 MHz ADC clk (per_ck=HSI64MHz /2) */
+    hadc1.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV1;  /* 64 MHz ADC clk (per_ck=HSI 64MHz /1) */
     hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
     hadc1.Init.ScanConvMode          = ENABLE;
     hadc1.Init.NbrOfConversion       = ADC_MAX_CHANNELS;
