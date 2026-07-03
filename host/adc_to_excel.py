@@ -3,8 +3,9 @@
 """Direct ADC burst → Excel exporter.  No GUI needed.
 
 Usage:
-    python adc_to_excel.py COM7                # PA6 only, 20kHz, 1000 samples
-    python adc_to_excel.py COM7 --ch1           # PA6 + PA7
+    python adc_to_excel.py COM7                      # PA6 only, 20kHz, 1000 samples
+    python adc_to_excel.py COM7 --ch1                # PA6 + PA7
+    python adc_to_excel.py COM7 --ch1 --ch2          # PA6 + PA7 + PC4
     python adc_to_excel.py COM7 --ch1 --rate 100000 --samples 32768
 """
 
@@ -22,21 +23,33 @@ from comm.protocol import (
     unpack_frame, CMD_ADC_DATA,
 )
 
-ADC_VREF = 3.3
-ADC_MAX  = 4095.0
+ADC_VREF   = 3.3
+ADC_MAX    = 4095.0
+ADC_OFFSET = 0.055   # voltage correction (V)
+CH_PINS    = ["PA6", "PA7", "PC4"]
 
 
 def main():
     parser = argparse.ArgumentParser(description="ADC burst → Excel")
     parser.add_argument("port", help="COM port, e.g. COM7")
-    parser.add_argument("--ch1", action="store_true", help="Enable PA7 (CH1)")
-    parser.add_argument("--rate", type=int, default=20000, help="Sample rate Hz (default 20000)")
-    parser.add_argument("--samples", type=int, default=1000, help="Samples per channel (default 1000)")
-    parser.add_argument("--output", default="", help="Output .xlsx path (default: auto-timestamp)")
+    parser.add_argument("--ch1", action="store_true", help="Enable PA7")
+    parser.add_argument("--ch2", action="store_true", help="Enable PC4")
+    parser.add_argument("--rate", type=int, default=20000,
+                        help="Sample rate Hz (default 20000)")
+    parser.add_argument("--samples", type=int, default=1000,
+                        help="Samples per channel (default 1000)")
+    parser.add_argument("--output", default="",
+                        help="Output .xlsx path (default: auto-timestamp)")
     args = parser.parse_args()
 
-    ch_mask = 0x01 | (0x02 if args.ch1 else 0x00)
-    num_ch  = 1 if not args.ch1 else 2
+    ch_mask = 0x01  # PA6 always on
+    if args.ch1:
+        ch_mask |= 0x02
+    if args.ch2:
+        ch_mask |= 0x04
+    num_ch = bin(ch_mask).count("1")
+    active_pins = [
+        CH_PINS[i] for i in range(len(CH_PINS)) if ch_mask & (1 << i)]
 
     print(f"[INFO] Opening {args.port} ...")
     ser = serial.Serial(args.port, baudrate=115200, timeout=2.0)
@@ -51,7 +64,8 @@ def main():
     # ── Send burst ─────────────────────────────────────────────────
     frame = build_adc_burst(ch_mask, args.samples)
     ser.write(frame.to_bytes())
-    print(f"[TX] BURST ch=0x{ch_mask:02X} samples={args.samples} rate={args.rate}Hz")
+    print(f"[TX] BURST ch=0x{ch_mask:02X} samples={args.samples} "
+          f"rate={args.rate}Hz")
 
     # ── Receive all CMD_ADC_DATA frames ────────────────────────────
     buf_raw = b""
@@ -78,20 +92,20 @@ def main():
                 payload = frame.payload
                 if len(payload) < 4:
                     continue
-                # payload: [seq(2B)][ch_mask(1B)][mode(1B)][samples(2B LE × N)]
                 seq  = payload[0] | (payload[1] << 8)
                 mask = payload[2]
                 raw_bytes = payload[4:]
-                samples = struct.unpack("<" + "H" * (len(raw_bytes) // 2), raw_bytes)
+                samples = struct.unpack(
+                    "<" + "H" * (len(raw_bytes) // 2), raw_bytes)
                 n = len(samples)
                 received += n
-                # De-interleave: [CH0, CH1, CH0, CH1, ...]
                 for i in range(0, n, num_ch):
                     for c in range(num_ch):
                         if i + c < len(samples):
                             ch_buffers[c].append(samples[i + c])
                 pct = min(100, received * 100 // burst_total)
-                print(f"\r[RX] {received}/{burst_total} ({pct}%)  seq={seq}", end="", flush=True)
+                print(f"\r[RX] {received}/{burst_total} ({pct}%)  "
+                      f"seq={seq}", end="", flush=True)
 
     print()
     ser.close()
@@ -117,22 +131,20 @@ def main():
     ws = wb.active
     ws.title = "ADC数据"
 
-    headers = ["样本序号", "PA6电压(V)"]
-    if args.ch1:
-        headers.append("PA7电压(V)")
+    headers = ["样本序号"] + [f"{p}电压(V)" for p in active_pins]
     for ci, h in enumerate(headers, 1):
         ws.cell(row=1, column=ci, value=h)
 
     for r in range(args.samples):
         ws.cell(row=r + 2, column=1, value=r)
-        ws.cell(row=r + 2, column=2,
-                value=round(ch_buffers[0][r] * ADC_VREF / ADC_MAX, 4))
-        if args.ch1:
-            ws.cell(row=r + 2, column=3,
-                    value=round(ch_buffers[1][r] * ADC_VREF / ADC_MAX, 4))
+        for c in range(num_ch):
+            ws.cell(row=r + 2, column=c + 2,
+                    value=round(ch_buffers[c][r] * ADC_VREF / ADC_MAX
+                                - ADC_OFFSET, 4))
 
     wb.save(out_path)
-    print(f"[OK]  Saved: {out_path}  ({args.samples} samples × {num_ch} channels)")
+    print(f"[OK]  Saved: {out_path}  "
+          f"({args.samples} samples × {num_ch} channels)")
     return 0
 
 

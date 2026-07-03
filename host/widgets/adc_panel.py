@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ADC one-click burst capture + auto Excel export.
-Two channels offset vertically, independently adjustable."""
+"""ADC multi-channel burst capture — 3 linked X axes, independent Y axes."""
 
 import os
 import threading
@@ -20,18 +19,21 @@ from comm.protocol import build_adc_config, build_adc_burst, parse_adc_data
 from comm.protocol import CMD_ACK, CMD_ADC_DATA
 from comm.serial_link import SerialLink
 
-CH_COLORS = [(255, 80, 80), (80, 200, 80)]
-CH_PINS   = ["PA6", "PA7"]
-CH_NAMES  = ["PA6", "PA7"]
-ADC_VREF  = 3.3
-ADC_MAX   = 4095.0
-NUM_CH    = 2
-CH_BASE   = [5.0, 2.0]   # y-baseline per channel (volt)
+CH_COLORS  = [(255, 80, 80), (80, 200, 80), (80, 120, 255)]  # red, green, blue
+CH_PINS    = ["PA6", "PA7", "PC4"]
+CH_NAMES   = ["PA6", "PA7", "PC4"]
+ADC_VREF   = 3.3
+ADC_MAX    = 4095.0
+ADC_OFFSET = 0.055   # voltage correction (V)
+NUM_CH     = 3
+
 
 class AdcViewBox(pg.ViewBox):
+    """Pan horizontally; Ctrl+wheel = horiz zoom, wheel = vert zoom."""
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
         self.setMouseMode(pg.ViewBox.PanMode)
+
     def wheelEvent(self, ev, axis=None):
         if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             super().wheelEvent(ev, axis=0)
@@ -50,11 +52,12 @@ class AdcPanel(QWidget):
         self._lock = threading.Lock()
         self._offset_spins = []
 
-        self._burst_pending = False
-        self._burst_expect  = 0
+        self._burst_pending  = False
+        self._burst_expect   = 0
         self._burst_received = 0
         self._burst_num_ch   = 0
         self._burst_ch_mask  = 0
+        self._burst_ch_map   = []   # col_index → physical ch index
         self._burst_buf      = []
         self._buffers = [[] for _ in range(NUM_CH)]
 
@@ -94,18 +97,20 @@ class AdcPanel(QWidget):
         cfg.addStretch()
 
         self.btn_go = QPushButton("采集并导出Excel")
-        self.btn_go.setStyleSheet("font-weight: bold; min-height: 32px; font-size: 14px;")
+        self.btn_go.setStyleSheet(
+            "font-weight: bold; min-height: 32px; font-size: 14px;")
         self.btn_go.clicked.connect(self._on_go)
         cfg.addWidget(self.btn_go)
         outer.addLayout(cfg)
 
         # ── Offset row ────────────────────────────────────────
         off_row = QHBoxLayout()
-        off_row.addWidget(QLabel("偏移:"))
+        off_row.addWidget(QLabel("偏移(V):"))
         self._offset_spins = []
         for i in range(NUM_CH):
             color = CH_COLORS[i]
-            off_row.addWidget(QLabel(f"<font color='rgb{color}'>{CH_NAMES[i]}</font>"))
+            off_row.addWidget(QLabel(
+                f"<font color='rgb{color}'>{CH_NAMES[i]}</font>"))
             spin = QDoubleSpinBox()
             spin.setRange(-3.0, 3.0)
             spin.setSingleStep(0.1)
@@ -122,25 +127,41 @@ class AdcPanel(QWidget):
         self.lbl_status.setStyleSheet("color: gray;")
         outer.addWidget(self.lbl_status)
 
-        # ── Plot ───────────────────────────────────────────────
-        self.plot_widget = pg.PlotWidget(viewBox=AdcViewBox())
-        self.plot_widget.setLabel("bottom", "样本序号")
-        self.plot_widget.setLabel("left", "电压", units="V")
-        self.plot_widget.showGrid(x=True, y=True)
-        self.plot_widget.setYRange(-0.5, 7.5, padding=0.0)
-        ticks = []
-        for i in range(NUM_CH):
-            y0 = CH_BASE[i]
-            ticks.append((y0, f"{CH_NAMES[i]} 0V"))
-            for v in (1, 2, 3):
-                ticks.append((y0 + v, f"{CH_NAMES[i]} {v}V"))
-        self.plot_widget.getAxis("left").setTicks([ticks])
+        # ── 3 linked plots (stacked vertically, X-linked) ─────
+        self._plots  = []
         self._curves = []
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
         for i in range(NUM_CH):
+            pw = pg.PlotWidget(viewBox=AdcViewBox())
+            pw.setLabel("left", CH_NAMES[i], units="V")
+            pw.setYRange(0, 4, padding=0)
+            pw.showGrid(x=True, y=True)
+
             pen = pg.mkPen(color=CH_COLORS[i], width=1.5)
-            curve = self.plot_widget.plot(pen=pen, name=CH_NAMES[i])
+            curve = pw.plot(pen=pen, name=CH_NAMES[i])
+
+            self._plots.append(pw)
             self._curves.append(curve)
-        outer.addWidget(self.plot_widget, stretch=1)
+            splitter.addWidget(pw)
+
+        # Link X-axes to the first plot
+        base_vb = self._plots[0].getViewBox()
+        for i in range(1, NUM_CH):
+            self._plots[i].getViewBox().setXLink(base_vb)
+
+        # Only bottom plot shows X-axis tick labels
+        self._plots[-1].setLabel("bottom", "样本序号")
+        for i in range(NUM_CH - 1):
+            self._plots[i].getAxis("bottom").setStyle(showValues=False)
+
+        splitter.setSizes([150, 150, 150])
+        outer.addWidget(splitter, stretch=1)
+
+    # ----------------------------------------------------------------
+    # Helpers
+    # ----------------------------------------------------------------
 
     def _schedule_update(self):
         self._update_plot()
@@ -151,6 +172,10 @@ class AdcPanel(QWidget):
             if chk.isChecked():
                 mask |= (1 << i)
         return mask
+
+    # ----------------------------------------------------------------
+    # Burst capture
+    # ----------------------------------------------------------------
 
     def _on_go(self):
         if not self.link.is_open():
@@ -165,7 +190,9 @@ class AdcPanel(QWidget):
         ns   = self.sb_samples.value()
         num_ch = bin(mask).count("1")
 
-        # Clear previous
+        # Build column→physical mapping  (firmware sends in PA6→PA7→PC4 order)
+        ch_map = [i for i in range(NUM_CH) if mask & (1 << i)]
+
         with self._lock:
             for b in self._buffers:
                 b.clear()
@@ -175,10 +202,14 @@ class AdcPanel(QWidget):
         self._burst_received = 0
         self._burst_num_ch   = num_ch
         self._burst_ch_mask  = mask
+        self._burst_ch_map   = ch_map
         self._burst_buf      = [[] for _ in range(num_ch)]
 
         self.btn_go.setEnabled(False)
-        self.lbl_status.setText(f"采集中... {ns}样本 x {num_ch}通道 @ {rate}Hz")
+        ch_names = ", ".join(
+            CH_PINS[i] for i in range(NUM_CH) if mask & (1 << i))
+        self.lbl_status.setText(
+            f"采集中... {ns}样本 x {num_ch}通道({ch_names}) @ {rate}Hz")
         self.lbl_status.setStyleSheet("color: orange; font-weight: bold;")
 
         self.link.send(build_adc_config(mask, rate, mode=0).to_bytes())
@@ -186,7 +217,13 @@ class AdcPanel(QWidget):
 
     def _send_burst(self, mask, ns):
         self.link.send(build_adc_burst(mask, ns).to_bytes())
-        self.log_signal.emit(f"[TX] BURST ch=0x{mask:02X} n={ns} rate={self.sb_rate.value()}Hz")
+        self.log_signal.emit(
+            f"[TX] BURST ch=0x{mask:02X} n={ns} "
+            f"rate={self.sb_rate.value()}Hz")
+
+    # ----------------------------------------------------------------
+    # Frame handler
+    # ----------------------------------------------------------------
 
     def on_frame(self, frame):
         if frame.cmd == CMD_ADC_DATA:
@@ -214,22 +251,34 @@ class AdcPanel(QWidget):
                 expected_spc = self._burst_expect // num_en
 
                 if self._burst_received >= expected_spc:
+                    ch_map = self._burst_ch_map
                     with self._lock:
-                        for c in range(num_en):
-                            self._buffers[c] = list(np.concatenate(buf[c])) if buf[c] else []
-                        for c in range(num_en, NUM_CH):
-                            self._buffers[c] = []
+                        for col in range(num_en):
+                            phys = ch_map[col]
+                            self._buffers[phys] = (
+                                list(np.concatenate(buf[col]))
+                                if buf[col] else [])
+                        # Clear unused channels
+                        for i in range(NUM_CH):
+                            if i not in ch_map:
+                                self._buffers[i] = []
 
                     self._burst_pending = False
                     self._update_plot()
                     self._export_excel()
                     self.btn_go.setEnabled(True)
                     self.lbl_status.setText(f"完成: {expected_spc} 样本/通道")
-                    self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
-                    self.log_signal.emit(f"[INFO] Burst完成: {expected_spc} spc/ch")
+                    self.lbl_status.setStyleSheet(
+                        "color: green; font-weight: bold;")
+                    self.log_signal.emit(
+                        f"[INFO] Burst完成: {expected_spc} spc/ch")
 
         elif frame.cmd == CMD_ACK:
             pass
+
+    # ----------------------------------------------------------------
+    # Excel export
+    # ----------------------------------------------------------------
 
     def _export_excel(self):
         log_dir = r"D:\test\STM32H723ZGT6\host\adc_logs"
@@ -240,36 +289,42 @@ class AdcPanel(QWidget):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "ADC"
-        num_ch = self._burst_num_ch
-        headers = ["样本序号"]
-        for c in range(num_ch):
-            headers.append(f"{CH_PINS[c]} 电压(V)")
+        ch_map = self._burst_ch_map
+        active_pins = [CH_PINS[i] for i in ch_map]
+        headers = ["样本序号"] + [f"{p} 电压(V)" for p in active_pins]
         for ci, h in enumerate(headers, 1):
             ws.cell(row=1, column=ci, value=h)
 
-        spc = len(self._buffers[0]) if self._buffers[0] else 0
+        spc = min(len(self._buffers[i]) if i in ch_map else 0
+                   for i in ch_map)
         for r in range(spc):
             ws.cell(row=r + 2, column=1, value=r)
-            for c in range(num_ch):
-                raw = self._buffers[c][r] if r < len(self._buffers[c]) else 0
+            for c, phys in enumerate(ch_map):
+                raw = (self._buffers[phys][r]
+                       if r < len(self._buffers[phys]) else 0)
                 ws.cell(row=r + 2, column=c + 2,
-                        value=round(raw * ADC_VREF / ADC_MAX, 4))
+                        value=round(raw * ADC_VREF / ADC_MAX - ADC_OFFSET, 4))
         wb.save(path)
         self.log_signal.emit(f"[INFO] Excel已保存: {path}")
+
+    # ----------------------------------------------------------------
+    # Plot update
+    # ----------------------------------------------------------------
 
     def _update_plot(self):
         with self._lock:
             bufs = [list(b) for b in self._buffers]
+        ch_map = self._burst_ch_map
         for i in range(NUM_CH):
             buf = bufs[i]
-            if not buf or i >= self._burst_num_ch:
+            if not buf or i not in ch_map:
                 self._curves[i].setData([], [])
                 continue
             arr = np.array(buf, dtype=np.float32)
-            volts = arr * ADC_VREF / ADC_MAX
+            volts = arr * ADC_VREF / ADC_MAX - ADC_OFFSET  # ← corrected
             n = len(volts)
-            offset = self._offset_spins[i].value() if i < len(self._offset_spins) else 0.0
-            y_base = CH_BASE[i] + offset
+            offset = (self._offset_spins[i].value()
+                      if i < len(self._offset_spins) else 0.0)
 
             if n > 8000:
                 bs = max(n // 4000, 2)
@@ -280,8 +335,10 @@ class AdcPanel(QWidget):
                 x = np.arange(0, trim, bs, dtype=np.float64)
                 x2 = np.empty(len(v_max) * 2, dtype=np.float64)
                 y2 = np.empty(len(v_max) * 2, dtype=np.float32)
-                x2[0::2] = x; x2[1::2] = x + bs
-                y2[0::2] = v_min + y_base; y2[1::2] = v_max + y_base
+                x2[0::2] = x
+                x2[1::2] = x + bs
+                y2[0::2] = v_min + offset
+                y2[1::2] = v_max + offset
                 self._curves[i].setData(x2, y2)
             else:
-                self._curves[i].setData(np.arange(n), volts + y_base)
+                self._curves[i].setData(np.arange(n), volts + offset)

@@ -413,6 +413,10 @@ static void MX_GPIO_Init(void)
     GPIO_InitStructAnalog.Pin = GPIO_PIN_6 | GPIO_PIN_7;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStructAnalog);
 
+    /* PC4 (ADC1_IN4) as analog — 3rd ADC channel */
+    GPIO_InitStructAnalog.Pin = GPIO_PIN_4;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStructAnalog);
+
     __HAL_RCC_SYSCFG_CLK_ENABLE();
 
     GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3;

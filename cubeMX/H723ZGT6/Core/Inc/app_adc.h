@@ -4,8 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define ADC_BURST_MAX_SAMPLES  16384   /* 64 KB, safe for DTCM */
-#define ADC_MAX_CHANNELS       2
+#define ADC_BURST_MAX_SAMPLES  16384   /* 3ch × 16384 × 2B = 96 KB, safe for 128KB DTCM */
+#define ADC_MAX_CHANNELS       3
 
 /* ── Layer 3: dual-channel scan + TIM3 trigger ───────────────────── */
 void APP_ADC_InitDual(uint32_t sample_rate_hz);

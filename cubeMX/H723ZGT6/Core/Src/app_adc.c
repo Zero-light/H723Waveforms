@@ -58,7 +58,7 @@ void APP_ADC_InitDual(uint32_t sample_rate_hz)
     hadc1.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV4;
     hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
     hadc1.Init.ScanConvMode          = ENABLE;
-    hadc1.Init.NbrOfConversion       = 2;
+    hadc1.Init.NbrOfConversion       = ADC_MAX_CHANNELS;
     hadc1.Init.ContinuousConvMode    = DISABLE;
     hadc1.Init.DiscontinuousConvMode = DISABLE;
     hadc1.Init.ExternalTrigConv      = ADC_EXTERNALTRIG_T3_TRGO;
@@ -70,7 +70,7 @@ void APP_ADC_InitDual(uint32_t sample_rate_hz)
 
     if (HAL_ADC_Init(&hadc1) != HAL_OK) { while (1) { } }
 
-    ADC_ConfigChannels(0x03);
+    ADC_ConfigChannels(0x07);  /* PA6 + PA7 + PC4 */
 
     s_initialized = true;
 }
@@ -247,6 +247,11 @@ static void ADC_ConfigChannels(uint8_t ch_mask)
     }
     if (ch_mask & 0x02) {
         sChan.Channel = ADC_CHANNEL_7;
+        sChan.Rank    = RANK_TABLE[rank++];
+        HAL_ADC_ConfigChannel(&hadc1, &sChan);
+    }
+    if (ch_mask & 0x04) {
+        sChan.Channel = ADC_CHANNEL_4;   /* PC4 = ADC1_IN4 */
         sChan.Rank    = RANK_TABLE[rank++];
         HAL_ADC_ConfigChannel(&hadc1, &sChan);
     }
