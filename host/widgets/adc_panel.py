@@ -104,7 +104,7 @@ class AdcPanel(QWidget):
         cfg = QHBoxLayout()
         cfg.addWidget(QLabel("采样率(Hz):"))
         self.sb_rate = QSpinBox()
-        self.sb_rate.setRange(1000, 500000)
+        self.sb_rate.setRange(1000, 1000000)
         self.sb_rate.setValue(20000)
         self.sb_rate.setSingleStep(1000)
         cfg.addWidget(self.sb_rate)
