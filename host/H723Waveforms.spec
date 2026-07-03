@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('widgets', 'widgets')],
+    datas=[('comm', 'comm'), ('widgets', 'widgets')],
     hiddenimports=['openpyxl'],
     hookspath=[],
     hooksconfig={},

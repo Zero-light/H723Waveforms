@@ -1,12 +1,14 @@
 ﻿"""SPI 寄存器写入面板, 支持命名多预设."""
 
 import json, os
+from datetime import datetime
 from typing import List, Tuple
 
+import openpyxl
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QSpinBox, QComboBox, QTableWidget, QTableWidgetItem,
-    QGroupBox, QMessageBox, QCheckBox, QInputDialog,
+    QGroupBox, QMessageBox, QCheckBox, QInputDialog, QFileDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
@@ -15,10 +17,11 @@ from comm.serial_link import SerialLink
 
 _PRESET_PATH = os.path.join(os.path.expanduser("~"), ".h723_spi_presets.json")
 
-PRESET_COL_ADDR = 3
-PRESET_COL_DATA = 4
-SEND_COL_ADDR   = 0
-SEND_COL_DATA   = 1
+SEND_COL_CHECK  = 0
+SEND_COL_ADDR   = 1
+SEND_COL_DATA   = 2
+PRESET_COL_ADDR = 4
+PRESET_COL_DATA = 5
 NUM_ROWS        = 8
 
 
@@ -84,10 +87,19 @@ class SpiPanel(QWidget):
         reg_layout = QVBoxLayout(reg_box)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["地址","数据","","预设地址","预设数据"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["✓","地址","数据","","预设地址","预设数据"])
         self.table.setRowCount(NUM_ROWS)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        self.table.horizontalHeader().setSectionResizeMode(0, self.table.horizontalHeader().ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 30)
+
+        self._row_checks = []
         for r in range(NUM_ROWS):
+            chk = QCheckBox()
+            chk.setChecked(True)
+            self._row_checks.append(chk)
+            self.table.setCellWidget(r, SEND_COL_CHECK, chk)
             for c in (SEND_COL_ADDR, SEND_COL_DATA, PRESET_COL_ADDR, PRESET_COL_DATA):
                 item = QTableWidgetItem("00")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -95,8 +107,8 @@ class SpiPanel(QWidget):
             sep = QTableWidgetItem("")
             sep.setFlags(Qt.ItemFlag.NoItemFlags)
             sep.setBackground(Qt.GlobalColor.lightGray)
-            self.table.setItem(r, 2, sep)
-        self.table.setColumnWidth(2, 30)
+            self.table.setItem(r, 3, sep)
+        self.table.setColumnWidth(3, 30)
         self.table.horizontalHeader().setStretchLastSection(True)
         reg_layout.addWidget(self.table)
 
@@ -122,6 +134,14 @@ class SpiPanel(QWidget):
         self.btn_delete_preset = QPushButton("删除")
         self.btn_delete_preset.clicked.connect(self._delete_preset)
         ps_layout.addWidget(self.btn_delete_preset)
+
+        self.btn_export = QPushButton("导出Excel")
+        self.btn_export.clicked.connect(self._export_excel)
+        ps_layout.addWidget(self.btn_export)
+
+        self.btn_import = QPushButton("导入Excel")
+        self.btn_import.clicked.connect(self._import_excel)
+        ps_layout.addWidget(self.btn_import)
         ps_layout.addStretch()
         reg_layout.addLayout(ps_layout)
 
@@ -138,12 +158,6 @@ class SpiPanel(QWidget):
         self.btn_send = QPushButton("发送")
         self.btn_send.clicked.connect(self._send_regs)
         send_layout.addWidget(self.btn_send)
-
-        send_layout.addWidget(QLabel("行数:"))
-        self.sb_rows = QSpinBox()
-        self.sb_rows.setRange(1, NUM_ROWS)
-        self.sb_rows.setValue(NUM_ROWS)
-        send_layout.addWidget(self.sb_rows)
 
         self.chk_burst = QCheckBox("持续发送")
         self.chk_burst.stateChanged.connect(self._toggle_burst)
@@ -367,9 +381,10 @@ class SpiPanel(QWidget):
         if not self.link.is_open():
             return
         regs: List[Tuple[int, int]] = []
-        send_count = self.sb_rows.value()
         dwidth = self.cb_dwidth.currentData()
-        for r in range(send_count):
+        for r in range(NUM_ROWS):
+            if not self._row_checks[r].isChecked():
+                continue
             ai = self.table.item(r, SEND_COL_ADDR)
             di = self.table.item(r, SEND_COL_DATA)
             if not ai or not di:
@@ -412,6 +427,92 @@ class SpiPanel(QWidget):
         else:
             self._burst_timer.stop()
             self.log_signal.emit("[INFO] SPI 持续发送已停止")
+
+    def _on_header_clicked(self, idx):
+        if idx == SEND_COL_CHECK:
+            # Toggle: if all checked → uncheck all; else → check all
+            all_checked = all(chk.isChecked() for chk in self._row_checks)
+            for chk in self._row_checks:
+                chk.setChecked(not all_checked)
+
+    # ----------------------------------------------------------------
+    # Excel 导入导出
+    # ----------------------------------------------------------------
+    _EXPORT_DIR = r"D:\test\STM32H723ZGT6\host\spi_contest"
+
+    def _export_excel(self):
+        if not self._presets_db:
+            QMessageBox.information(self, "导出失败", "没有可导出的预设。")
+            return
+        os.makedirs(self._EXPORT_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self._EXPORT_DIR, f"spi_presets_{ts}.xlsx")
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)  # remove default sheet
+        for name, rows in self._presets_db.items():
+            ws = wb.create_sheet(title=name[:31])  # Excel sheet name max 31 chars
+            ws.cell(row=1, column=1, value="行号")
+            ws.cell(row=1, column=2, value="地址(Hex)")
+            ws.cell(row=1, column=3, value="数据(Hex)")
+            for r in range(NUM_ROWS):
+                row = rows.get(str(r), ["00", "00"])
+                ws.cell(row=r + 2, column=1, value=r)
+                ws.cell(row=r + 2, column=2, value=row[0])
+                ws.cell(row=r + 2, column=3, value=row[1])
+        wb.save(path)
+        self.log_signal.emit(f"[INFO] 预设已导出到: {path}")
+
+    def _import_excel(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入 SPI 预设", self._EXPORT_DIR,
+            "Excel 文件 (*.xlsx);;所有文件 (*)")
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.load_workbook(path)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"无法读取 Excel 文件:\n{e}")
+            return
+
+        imported = 0
+        overwritten = []
+        for ws in wb.worksheets:
+            name = ws.title.strip()
+            if not name:
+                continue
+            preset = {}
+            for row_idx in range(2, 2 + NUM_ROWS):
+                r = row_idx - 2
+                addr_cell = ws.cell(row=row_idx, column=2).value
+                data_cell = ws.cell(row=row_idx, column=3).value
+                addr = str(addr_cell).strip() if addr_cell is not None else "00"
+                data = str(data_cell).strip() if data_cell is not None else "00"
+                preset[str(r)] = [addr, data]
+            if name in self._presets_db:
+                overwritten.append(name)
+            self._presets_db[name] = preset
+            imported += 1
+
+        self._save_preset_db()
+
+        # Refresh combo box
+        self.cb_preset.blockSignals(True)
+        self.cb_preset.clear()
+        names = sorted(self._presets_db.keys())
+        self.cb_preset.addItems(names)
+        if names:
+            self.cb_preset.setCurrentIndex(0)
+        self.cb_preset.blockSignals(False)
+        if names:
+            self._show_preset(names[0])
+
+        msg = f"已导入 {imported} 个预设"
+        if overwritten:
+            msg += f"\n已覆盖: {', '.join(overwritten)}"
+        self.log_signal.emit(f"[INFO] {msg}")
+        QMessageBox.information(self, "导入完成", msg)
 
     def on_frame(self, frame):
         from comm.protocol import CMD_ACK
