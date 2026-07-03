@@ -260,7 +260,7 @@ class WavePanel(QWidget):
             namelbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             left_plot_layout.addWidget(namelbl)
             spin = QDoubleSpinBox()
-            spin.setRange(-3.0, 3.0)
+            spin.setRange(-10.0, 10.0)
             spin.setSingleStep(0.1)
             spin.setValue(0.0)
             spin.setDecimals(1)
