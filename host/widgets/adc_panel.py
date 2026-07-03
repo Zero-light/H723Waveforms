@@ -10,6 +10,7 @@ import numpy as np
 import pyqtgraph as pg
 import openpyxl
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QSpinBox, QDoubleSpinBox, QGroupBox, QMessageBox, QCheckBox,
