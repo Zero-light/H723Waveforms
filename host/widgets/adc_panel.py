@@ -104,12 +104,18 @@ class AdcPanel(QWidget):
         self._mode = MODE_SINGLE
         self._ch_defs = list(SE_CH)
         self._n = len(self._ch_defs)
-        self._buf = [[] for _ in range(self._n)]
+        # dual capture buffers: A = primary (solid), B = comparison (dashed)
+        self._buf = [[] for _ in range(self._n)]     # slot A buffer
+        self._buf_b = [[] for _ in range(self._n)]   # slot B buffer
+        self._has_b = False                           # whether slot B has valid data
+        self._cap_slot = 'A'                          # next capture writes to this slot
         self._bs = 0; self._bs_ack = 0; self._bpend = False
         self._bexp = 0; self._brec = 0; self._bnb = 0; self._bmask = 0
         self._bmap = []; self._bbuf = []
         self._cur_vl = []; self._cur_tx = []; self._clk_pos = []
         self._m_cur = []; self._m_txt = []; self._m_cur_vl = []; self._m_cur_tx = []
+        # slot B curves (dashed lines for comparison) — independent + merged
+        self._ic_b = []; self._m_cur_b = []
         self._setup_ui(); self._load()
         self._ptimer = QTimer(self); self._ptimer.timeout.connect(self._update_plot); self._ptimer.start(100)
         self._btimer = QTimer(self); self._btimer.setSingleShot(True); self._btimer.timeout.connect(self._bust_timeout)
@@ -147,17 +153,23 @@ class AdcPanel(QWidget):
     def _apply(self, mode, cfg=None, send=True):
         self._mode = mode
         defs = SE_CH if mode == MODE_SINGLE else DF_CH
-        self._ch_defs = list(defs); self._n = len(defs); self._buf = [[] for _ in range(self._n)]
+        self._ch_defs = list(defs); self._n = len(defs)
+        self._buf = [[] for _ in range(self._n)]
+        self._buf_b = [[] for _ in range(self._n)]; self._has_b = False
+        self._cap_slot = 'A'
         (self.radio_diff if mode == MODE_DIFF else self.radio_single).setChecked(True)
         self._rebuild_ch_rows()
         if mode == MODE_SINGLE:
             plots, curves, lbls = self._se_p, self._se_c, self._se_l
+            curves_b = self._se_c_b
         else:
             plots, curves, lbls = self._df_p, self._df_c, self._df_l
+            curves_b = self._df_c_b
         if not self.btn_merge.isChecked():
             self._stack.setCurrentIndex(0 if mode == MODE_SINGLE else 1)
         self._ip, self._ic, self._il = plots, curves, lbls
-        for c in curves + (self._m_cur if mode == self._mode else []):
+        self._ic_b = curves_b
+        for c in curves + curves_b + (self._m_cur if mode == self._mode else []) + (self._m_cur_b if mode == self._mode else []):
             self._prepare_curve(c)
         self._rebuild_cursors(); self._rebuild_merged(mode)
         en = (cfg.get("channel_enabled", [True] * self._n) if cfg else [True] * self._n)[:self._n]
@@ -173,8 +185,9 @@ class AdcPanel(QWidget):
                     w.blockSignals(False)
         self._sync_names()
         # enable native downsample on every curve (in case rebuild missed any)
-        for c in (self._se_c + self._df_c + self._m_cur):
+        for c in (self._se_c + self._se_c_b + self._df_c + self._df_c_b + self._m_cur + self._m_cur_b):
             self._prepare_curve(c)
+        self._update_slot_indicator()
         if send and self.link.is_open():
             self.link.send(build_adc_config(self._mask(), self.sb_rate.value(), mode=self._mode).to_bytes())
             self.log_signal.emit(f"[INFO] ADC模式切换为：{'差分' if mode == MODE_DIFF else '单端'}")
@@ -241,20 +254,25 @@ class AdcPanel(QWidget):
             pw.getViewBox().sigRangeChanged.connect(self._ind_range_chg)
 
     def _rebuild_merged(self, mode):
-        for it in self._m_cur + self._m_txt + self._m_cur_vl + self._m_cur_tx:
+        for it in self._m_cur + self._m_cur_b + self._m_txt + self._m_cur_vl + self._m_cur_tx:
             try: self._mp.removeItem(it)
             except Exception: pass
-        self._m_cur.clear(); self._m_txt.clear(); self._m_cur_vl.clear(); self._m_cur_tx.clear()
+        self._m_cur.clear(); self._m_cur_b.clear(); self._m_txt.clear()
+        self._m_cur_vl.clear(); self._m_cur_tx.clear()
         defs = SE_CH if mode == MODE_SINGLE else DF_CH
         self._mp.setYRange(-3.4, 3.4, padding=0) if mode == MODE_DIFF else self._mp.setYRange(0, 4, padding=0)
         first = True
         for i, d in enumerate(defs):
             col = d["color"]
+            # slot A: solid line
             cv = self._mp.plot(pen=pg.mkPen(color=col, width=1.5), name=d["name"])
+            # slot B: dashed line (comparison)
+            cv_b = self._mp.plot(pen=pg.mkPen(color=col, width=1.5, style=Qt.PenStyle.DashLine),
+                                name=d["name"] + "_B")
             if first: first = False
             tx = pg.TextItem(text=d["name"], color=col, anchor=(0, 0.5), fill=pg.mkColor(0, 0, 0, 160))
             tx.setFont(QFont("", 11)); tx.setZValue(10); self._mp.addItem(tx)
-            self._m_cur.append(cv); self._m_txt.append(tx)
+            self._m_cur.append(cv); self._m_cur_b.append(cv_b); self._m_txt.append(tx)
             vl = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=(200, 200, 200), width=1, style=Qt.PenStyle.DashLine))
             vl.setVisible(False); self._mp.addItem(vl); self._m_cur_vl.append(vl)
             ct = pg.TextItem(text="", color=col, anchor=(0, 0), fill=pg.mkColor(0, 0, 0, 160))
@@ -306,19 +324,47 @@ class AdcPanel(QWidget):
         # action row
         ar = QHBoxLayout()
         self.lbl_st = QLabel("就绪"); self.lbl_st.setStyleSheet("color: gray;"); ar.addWidget(self.lbl_st)
+        ar.addSpacing(12)
+        # slot A status (clickable to clear)
+        self.btn_slot_a = QPushButton("● A")
+        self.btn_slot_a.setCheckable(False); self.btn_slot_a.setFixedWidth(48)
+        self.btn_slot_a.setStyleSheet("color: #00aa00; font-weight: bold; padding: 2px 4px;")
+        self.btn_slot_a.setToolTip("点击清除槽A波形"); self.btn_slot_a.clicked.connect(lambda: self._clear_slot('A'))
+        ar.addWidget(self.btn_slot_a)
+        # slot B status (clickable to clear)
+        self.btn_slot_b = QPushButton("○ B")
+        self.btn_slot_b.setCheckable(False); self.btn_slot_b.setFixedWidth(48)
+        self.btn_slot_b.setStyleSheet("color: gray; font-weight: bold; padding: 2px 4px;")
+        self.btn_slot_b.setToolTip("点击清除槽B波形"); self.btn_slot_b.clicked.connect(lambda: self._clear_slot('B'))
+        ar.addWidget(self.btn_slot_b)
+        ar.addSpacing(8)
+        self.btn_clear_all = QPushButton("清除全部")
+        self.btn_clear_all.clicked.connect(self._reset); ar.addWidget(self.btn_clear_all)
         ar.addStretch()
         self.btn_merge = QPushButton("合并显示"); self.btn_merge.setCheckable(True)
         self.btn_merge.toggled.connect(self._toggle_merge); ar.addWidget(self.btn_merge)
-        self.btn_reset = QPushButton("重置ADC波形"); self.btn_reset.clicked.connect(self._reset); ar.addWidget(self.btn_reset)
         o.addLayout(ar)
 
         # stacked: [0]=single-independent, [1]=diff-independent, [2]=merged
         self._stack = QStackedWidget()
         sp0, p0, c0, l0 = _build_independent(SE_CH); self._stack.addWidget(sp0)
         self._se_p, self._se_c, self._se_l = p0, c0, l0
+        # slot B dashed curves for single-ended independent view
+        self._se_c_b = []
+        for pw, d in zip(p0, SE_CH):
+            cb = pw.plot(pen=pg.mkPen(color=d["color"], width=1.5, style=Qt.PenStyle.DashLine),
+                         name=d["name"] + "_B")
+            self._se_c_b.append(cb)
         sp1, p1, c1, l1 = _build_independent(DF_CH); self._stack.addWidget(sp1)
         self._df_p, self._df_c, self._df_l = p1, c1, l1
+        # slot B dashed curves for differential independent view
+        self._df_c_b = []
+        for pw, d in zip(p1, DF_CH):
+            cb = pw.plot(pen=pg.mkPen(color=d["color"], width=1.5, style=Qt.PenStyle.DashLine),
+                         name=d["name"] + "_B")
+            self._df_c_b.append(cb)
         self._ip, self._ic, self._il = p0, c0, l0
+        self._ic_b = self._se_c_b
         # merged plot (built first so we can add it to stack)
         self._mp = pg.PlotWidget(viewBox=_VB())
         self._mp.setLabel("left", "电压", units="V"); self._mp.setLabel("bottom", "样本序号")
@@ -326,6 +372,8 @@ class AdcPanel(QWidget):
         self._mp.enableAutoRange(axis='x', enable=False); self._mp.showGrid(x=True, y=True)
         for i, d in enumerate(SE_CH):
             self._m_cur.append(self._mp.plot(pen=pg.mkPen(color=d["color"], width=1.5), name=d["name"]))
+            self._m_cur_b.append(self._mp.plot(pen=pg.mkPen(color=d["color"], width=1.5, style=Qt.PenStyle.DashLine),
+                                               name=d["name"] + "_B"))
             tx = pg.TextItem(text=d["name"], color=d["color"], anchor=(0, 0.5), fill=pg.mkColor(0, 0, 0, 160))
             tx.setFont(QFont("", 11)); tx.setZValue(10); self._mp.addItem(tx); self._m_txt.append(tx)
             vl = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=(200, 200, 200), width=1, style=Qt.PenStyle.DashLine))
@@ -364,42 +412,54 @@ class AdcPanel(QWidget):
     # ─── PLOT UPDATE ───
     def _update_plot(self):
         with self._lock:
-            raw_bufs = self._buf
+            raw_bufs_a = self._buf
+            raw_bufs_b = self._buf_b
         cmap = self._bmap
         p2d = {d["phys"]: ii for ii, d in enumerate(self._ch_defs)}
 
         N_SHORT = 2000   # below this: render every point; above: min/max envelope
-        for ci in range(len(self._ip)):
-            self._ic[ci].setData([], []); self._m_cur[ci].setData([], [])
-            if ci >= len(cmap): continue
-            ri = p2d.get(cmap[ci])
-            if ri is None or ri >= len(raw_bufs): continue
-            b = raw_bufs[ri]
-            if not b: continue
-            off = self._spins[ri].value() if ri < len(self._spins) else 0.0
-            volts = _raw2v(b, self._ch_defs[ri]["diff"]) + np.float32(off)
-            n = len(volts)
+
+        def _envelope(volts, n):
+            """Build direction-aware min/max envelope for a voltage array."""
             if n <= N_SHORT:
                 xx = np.arange(n, dtype=np.float64)
-                self._ic[ci].setData(xx, volts); self._m_cur[ci].setData(xx, volts)
-            else:
-                # min/max envelope — direction-aware to avoid visual "cross-line"
-                # at high↔low transitions (the last-high→first-low misconnection)
-                bs = max(n // 4000, 2)
-                trim = n - (n % bs)
-                v = volts[:trim].reshape(-1, bs)
-                v_max = v.max(axis=1); v_min = v.min(axis=1)
-                # determine direction for each block: falling or rising/flat?
-                falling = v[:, 0] > v[:, -1]
-                x = np.arange(0, trim, bs, dtype=np.float64)
-                x2 = np.empty(len(v_max) * 2, dtype=np.float64)
-                y2 = np.empty(len(v_max) * 2, dtype=np.float32)
-                x2[0::2] = x;      x2[1::2] = x + bs
-                # falling: max→min (correct visual direction)
-                # rising/flat: min→max
-                y2[0::2] = np.where(falling, v_max, v_min)
-                y2[1::2] = np.where(falling, v_min, v_max)
-                self._ic[ci].setData(x2, y2); self._m_cur[ci].setData(x2, y2)
+                return xx, volts
+            bs = max(n // 4000, 2)
+            trim = n - (n % bs)
+            v = volts[:trim].reshape(-1, bs)
+            v_max = v.max(axis=1); v_min = v.min(axis=1)
+            falling = v[:, 0] > v[:, -1]
+            x = np.arange(0, trim, bs, dtype=np.float64)
+            x2 = np.empty(len(v_max) * 2, dtype=np.float64)
+            y2 = np.empty(len(v_max) * 2, dtype=np.float32)
+            x2[0::2] = x;      x2[1::2] = x + bs
+            y2[0::2] = np.where(falling, v_max, v_min)
+            y2[1::2] = np.where(falling, v_min, v_max)
+            return x2, y2
+
+        # draw each slot for each channel
+        def _draw_slot(curves_ind, curves_mer, bufs, has_data_flag):
+            for ci in range(len(self._ip)):
+                if ci < len(curves_ind): curves_ind[ci].setData([], [])
+                if ci < len(curves_mer): curves_mer[ci].setData([], [])
+                if ci >= len(cmap): continue
+                ri = p2d.get(cmap[ci])
+                if ri is None or ri >= len(bufs): continue
+                b = bufs[ri]
+                if not b: continue
+                off = self._spins[ri].value() if ri < len(self._spins) else 0.0
+                volts = _raw2v(b, self._ch_defs[ri]["diff"]) + np.float32(off)
+                n = len(volts)
+                xx, yy = _envelope(volts, n)
+                if ci < len(curves_ind): curves_ind[ci].setData(xx, yy)
+                if ci < len(curves_mer): curves_mer[ci].setData(xx, yy)
+
+        # slot A (primary, solid) — always draw if buf has data
+        _draw_slot(self._ic, self._m_cur, raw_bufs_a, True)
+        # slot B (comparison, dashed) — draw only if has data
+        if self._has_b:
+            _draw_slot(self._ic_b, self._m_cur_b, raw_bufs_b, True)
+
         self._refresh_labels()
 
     def _refresh_labels(self):
@@ -424,17 +484,23 @@ class AdcPanel(QWidget):
         if not pw.getViewBox().sceneBoundingRect().contains(ev.scenePos()): return
         spos = ev.scenePos(); self._clk_pos[ix] = spos
         px = int(round(pw.getViewBox().mapSceneToView(spos).x()))
-        with self._lock: bufs = [list(b) for b in self._buf]
+        with self._lock:
+            bufs_a = [list(b) for b in self._buf]
+            bufs_b = [list(b) for b in self._buf_b] if self._has_b else None
         cmap = self._bmap
-        if ix >= len(cmap) or not bufs[cmap[ix]]:
+        if ix >= len(cmap) or not bufs_a[cmap[ix]]:
             self._cur_vl[ix].setVisible(False); self._cur_tx[ix].setVisible(False); return
-        b = bufs[cmap[ix]]; n = len(b)
+        b = bufs_a[cmap[ix]]; n = len(b)
         if px < 0 or px >= n:
             self._cur_vl[ix].setVisible(False); self._cur_tx[ix].setVisible(False); return
         self._cur_vl[ix].setVisible(True); self._cur_vl[ix].setPos(px)
-        volts = _raw2v(b[px], self._ch_defs[cmap[ix]]["diff"]) - self._offs
+        volts_a = _raw2v(b[px], self._ch_defs[cmap[ix]]["diff"]) - self._offs
         nm = self._edits[cmap[ix]].text() if cmap[ix] < len(self._edits) else self._ch_defs[cmap[ix]]["pin"]
-        self._cur_tx[ix].setText(f"{nm} #{px}\n{volts:+.3f} V")
+        txt = f"{nm} #{px}\nA:{volts_a:+.3f}V"
+        if bufs_b and cmap[ix] < len(bufs_b) and bufs_b[cmap[ix]] and px < len(bufs_b[cmap[ix]]):
+            volts_b = _raw2v(bufs_b[cmap[ix]][px], self._ch_defs[cmap[ix]]["diff"]) - self._offs
+            txt += f"  B:{volts_b:+.3f}V"
+        self._cur_tx[ix].setText(txt)
         self._position_ind_label(ix, ev.scenePos()); self._cur_tx[ix].setVisible(True)
 
     def _position_ind_label(self, ix, spos):
@@ -461,7 +527,9 @@ class AdcPanel(QWidget):
         vb = self._mp.getViewBox()
         if not vb.sceneBoundingRect().contains(ev.scenePos()): return
         self._m_clk = ev.scenePos(); px = int(round(vb.mapSceneToView(ev.scenePos()).x()))
-        with self._lock: bufs = [list(b) for b in self._buf]
+        with self._lock:
+            bufs_a = [list(b) for b in self._buf]
+            bufs_b = [list(b) for b in self._buf_b] if self._has_b else None
         cmap = self._bmap
         shown = 0
         pt = vb.mapSceneToView(ev.scenePos())
@@ -471,12 +539,16 @@ class AdcPanel(QWidget):
             if ci >= len(cmap):
                 self._m_cur_vl[ci].setVisible(False); self._m_cur_tx[ci].setVisible(False); continue
             i = cmap[ci]
-            if not bufs[i] or px < 0 or px >= len(bufs[i]):
+            if not bufs_a[i] or px < 0 or px >= len(bufs_a[i]):
                 self._m_cur_vl[ci].setVisible(False); self._m_cur_tx[ci].setVisible(False); continue
-            volts = _raw2v(bufs[i][px], self._ch_defs[i]["diff"]) - self._offs
+            volts_a = _raw2v(bufs_a[i][px], self._ch_defs[i]["diff"]) - self._offs
             self._m_cur_vl[ci].setVisible(True); self._m_cur_vl[ci].setPos(px)
             nm = self._edits[i].text() if i < len(self._edits) else self._ch_defs[i]["pin"]
-            self._m_cur_tx[ci].setText(f"{nm} #{px}  {volts:+.3f} V")
+            txt = f"{nm} #{px} A:{volts_a:+.3f}V"
+            if bufs_b and i < len(bufs_b) and bufs_b[i] and px < len(bufs_b[i]):
+                volts_b = _raw2v(bufs_b[i][px], self._ch_defs[i]["diff"]) - self._offs
+                txt += f" B:{volts_b:+.3f}V"
+            self._m_cur_tx[ci].setText(txt)
             self._m_cur_tx[ci].setPos(pt.x() + 5, pt.y() - shown * dy)
             self._m_cur_tx[ci].setVisible(True); shown += 1
 
@@ -511,17 +583,56 @@ class AdcPanel(QWidget):
         rate = self.sb_rate.value(); ns = self.sb_pts.value()
         ch_map = sorted(set(self._ch_defs[i]["phys"] for i, c in enumerate(self._chks) if c.isChecked()))
         nb = len(ch_map)
+        # clear the target slot buffer before capture
+        target_buf = self._buf_b if self._cap_slot == 'B' else self._buf
         with self._lock:
-            for b in self._buf: b.clear()
+            for b in target_buf: b.clear()
         self._bs += 1; self._bs_ack = self._bs
         self._bpend = True; self._bexp = ns * nb; self._brec = 0
         self._bnb = nb; self._bmask = mask; self._bmap = ch_map; self._bbuf = [[] for _ in range(nb)]
         self.btn_go.setEnabled(False)
         pins = ", ".join(self._ch_defs[i]["pin"] for i, c in enumerate(self._chks) if c.isChecked())
-        self.lbl_st.setText(f"采集中... {ns}样本 x {nb}通道({pins}) @ {rate}Hz")
+        slot_label = "B" if self._cap_slot == 'B' else "A"
+        self.lbl_st.setText(f"采集→槽{slot_label}... {ns}样本 x {nb}通道({pins}) @ {rate}Hz")
         self.lbl_st.setStyleSheet("color: orange; font-weight: bold;")
         self.link.send(build_adc_config(mask, rate, mode=self._mode).to_bytes())
         QTimer.singleShot(50, lambda: self._send_burst(mask, ns)); self._btimer.start(5000)
+
+    # ─── slot management ─────────────────────────────────────────
+    def _clear_slot(self, slot):
+        """Clear a single capture slot ('A' or 'B')."""
+        if slot == 'A':
+            with self._lock:
+                for b in self._buf: b.clear()
+            for c in self._ic: c.setData([], [])
+            for c in self._m_cur: c.setData([], [])
+        else:  # 'B'
+            with self._lock:
+                for b in self._buf_b: b.clear()
+            self._has_b = False
+            for c in self._ic_b: c.setData([], [])
+            for c in self._m_cur_b: c.setData([], [])
+        self._update_plot()
+        self._update_slot_indicator()
+        self.log_signal.emit(f"[INFO] 槽{slot}波形已清除")
+
+    def _update_slot_indicator(self):
+        """Update slot A/B button styles to reflect data presence."""
+        has_a = any(len(b) > 0 for b in self._buf)
+        if has_a:
+            self.btn_slot_a.setText("● A")
+            self.btn_slot_a.setStyleSheet("color: #00aa00; font-weight: bold; padding: 2px 4px;")
+            self.btn_slot_a.setEnabled(True)
+        else:
+            self.btn_slot_a.setText("○ A")
+            self.btn_slot_a.setStyleSheet("color: gray; font-weight: bold; padding: 2px 4px;")
+        if self._has_b:
+            self.btn_slot_b.setText("● B")
+            self.btn_slot_b.setStyleSheet("color: #00aa00; font-weight: bold; padding: 2px 4px;")
+            self.btn_slot_b.setEnabled(True)
+        else:
+            self.btn_slot_b.setText("○ B")
+            self.btn_slot_b.setStyleSheet("color: gray; font-weight: bold; padding: 2px 4px;")
 
     def _send_burst(self, mask, ns):
         self.link.send(build_adc_burst(mask, ns).to_bytes())
@@ -531,10 +642,15 @@ class AdcPanel(QWidget):
         self._bpend = False; self._bs_ack = 0; self._btimer.stop(); self.btn_go.setEnabled(True)
         with self._lock:
             for b in self._buf: b.clear()
+            for b in self._buf_b: b.clear()
+        self._has_b = False; self._cap_slot = 'A'
         for c in self._ic: c.setData([], [])
+        for c in self._ic_b: c.setData([], [])
         for c in self._m_cur: c.setData([], [])
-        self._hide_cursors(); self.lbl_st.setText("已重置"); self.lbl_st.setStyleSheet("color: gray;")
-        self.log_signal.emit("[INFO] ADC波形已重置")
+        for c in self._m_cur_b: c.setData([], [])
+        self._hide_cursors(); self.lbl_st.setText("已清除全部"); self.lbl_st.setStyleSheet("color: gray;")
+        self._update_slot_indicator()
+        self.log_signal.emit("[INFO] ADC波形已全部清除")
 
     def on_frame(self, frame):
         if frame.cmd == CMD_ADC_DATA:
@@ -557,26 +673,40 @@ class AdcPanel(QWidget):
                 if self._brec >= exp:
                     cmap = self._bmap
                     p2d = {d["phys"]: ii for ii, d in enumerate(self._ch_defs)}
+                    # write to target slot buffer
+                    target_buf = self._buf_b if self._cap_slot == 'B' else self._buf
                     with self._lock:
                         for col in range(ne):
                             phys = cmap[col] if col < len(cmap) else col
                             idx = p2d.get(phys)
                             if idx is not None:
-                                self._buf[idx] = list(np.concatenate(buf[col])) if buf[col] else []
-                    self._bpend = False; self.log_signal.emit(f"[INFO] Burst完成: {exp} spc/ch"); self._burst_done.emit()
+                                target_buf[idx] = list(np.concatenate(buf[col])) if buf[col] else []
+                    self._bpend = False; self.log_signal.emit(f"[INFO] Burst完成: {exp} spc/ch→槽{self._cap_slot}"); self._burst_done.emit()
         elif frame.cmd == CMD_ACK and len(frame.payload) >= 2:
             ok = frame.payload[1]
             if ok != 0:
                 self.log_signal.emit(f"[WARN] 命令 0x{frame.payload[0]:02X} 执行失败")
 
-    @pyqtSlot()
-    def _bust_slot(self):
+    def _after_capture(self):
+        """Common post-capture: flip slot, update plot & indicators, export."""
+        slot_used = self._cap_slot
+        # update has_b flag
+        if slot_used == 'B':
+            self._has_b = True
+        # flip slot for next capture (A→B, B→A)
+        self._cap_slot = 'B' if slot_used == 'A' else 'A'
         try: self._update_plot(); self._export_excel()
         except Exception as e: self.log_signal.emit(f"[WARN] 采集异常：{e}")
         self.btn_go.setEnabled(True)
         spc = self._bexp // max(self._bnb, 1)
-        self.lbl_st.setText(f"完成: {spc} 样本/通道"); self.lbl_st.setStyleSheet("color: green; font-weight: bold;")
+        self.lbl_st.setText(f"完成: {spc} 样本/通道 (槽{slot_used})"); self.lbl_st.setStyleSheet("color: green; font-weight: bold;")
         self._btimer.stop()
+        self._update_slot_indicator()
+        self.log_signal.emit(f"[INFO] 槽{slot_used}已更新，下次采集→槽{self._cap_slot}")
+
+    @pyqtSlot()
+    def _bust_slot(self):
+        self._after_capture()
 
     def _bust_timeout(self):
         if not self._bpend: return
@@ -584,20 +714,17 @@ class AdcPanel(QWidget):
             self._bpend = False; self.btn_go.setEnabled(True)
             self.lbl_st.setText("采集超时（无数据）"); self.lbl_st.setStyleSheet("color: red; font-weight: bold;")
             self.log_signal.emit("[WARN] 采集超时：未收到任何 ADC 数据"); return
+        # write partial data to target slot
         cmap = self._bmap; nb = self._bnb; buf = self._bbuf
+        target_buf = self._buf_b if self._cap_slot == 'B' else self._buf
         with self._lock:
             for col in range(nb):
                 phys = cmap[col] if col < len(cmap) else col
                 idx = next((ii for ii, d in enumerate(self._ch_defs) if d["phys"] == phys), None)
-                if idx is not None and idx < len(self._buf):
-                    self._buf[idx] = list(np.concatenate(buf[col])) if buf[col] else []
+                if idx is not None and idx < len(target_buf):
+                    target_buf[idx] = list(np.concatenate(buf[col])) if buf[col] else []
         self._bpend = False
-        try: self._update_plot(); self._export_excel()
-        except Exception as e: self.log_signal.emit(f"[WARN] 超时处理异常：{e}")
-        spc = len(self._buf[cmap[0]]) if cmap else 0
-        self.btn_go.setEnabled(True); self.lbl_st.setText(f"完成: {spc} 样本/通道 (超时)")
-        self.lbl_st.setStyleSheet("color: green; font-weight: bold;")
-        self.log_signal.emit(f"[INFO] Burst超时完成: {spc} spc/ch")
+        self._after_capture()
 
     # ─── EXCEL EXPORT ───
     def _export_excel(self):
@@ -614,17 +741,28 @@ class AdcPanel(QWidget):
     def _save_excel(self, path):
         cmap = self._bmap
         if not cmap: self.log_signal.emit("[WARN] 没有可导出的波形数据"); return
-        wb = openpyxl.Workbook(); ws = wb.active; ws.title = "ADC"
-        hdr = ["样本序号"]
-        for ci in cmap:
-            dff = self._ch_defs[ci]["diff"]; nm = self._edits[ci].text() if ci < len(self._edits) else self._ch_defs[ci]["pin"]
-            hdr.append(f"{nm} {'差分' if dff else ''}电压(V)")
-        for ci, h in enumerate(hdr, 1): ws.cell(row=1, column=ci, value=h)
-        with self._lock: bufs = [list(b) for b in self._buf]
-        spc = min(len(bufs[ci]) if ci < len(bufs) else 0 for ci in cmap)
-        for r in range(spc):
-            ws.cell(row=r + 2, column=1, value=r)
-            for ji, ci in enumerate(cmap):
-                raw = bufs[ci][r] if ci < len(bufs) and r < len(bufs[ci]) else 0
-                ws.cell(row=r + 2, column=ji + 2, value=round(_raw2v(raw, self._ch_defs[ci]["diff"]) - self._offs, 4))
+        wb = openpyxl.Workbook()
+
+        def _write_sheet(ws, title, bufs_source):
+            ws.title = title
+            hdr = ["样本序号"]
+            for ci in cmap:
+                dff = self._ch_defs[ci]["diff"]; nm = self._edits[ci].text() if ci < len(self._edits) else self._ch_defs[ci]["pin"]
+                hdr.append(f"{nm} {'差分' if dff else ''}电压(V)")
+            for ci, h in enumerate(hdr, 1): ws.cell(row=1, column=ci, value=h)
+            with self._lock: bufs = [list(b) for b in bufs_source]
+            spc = min(len(bufs[ci]) if ci < len(bufs) else 0 for ci in cmap)
+            for r in range(spc):
+                ws.cell(row=r + 2, column=1, value=r)
+                for ji, ci in enumerate(cmap):
+                    raw = bufs[ci][r] if ci < len(bufs) and r < len(bufs[ci]) else 0
+                    ws.cell(row=r + 2, column=ji + 2, value=round(_raw2v(raw, self._ch_defs[ci]["diff"]) - self._offs, 4))
+
+        # Sheet 1: slot A (always)
+        _write_sheet(wb.active, "Capture_A", self._buf)
+        # Sheet 2: slot B (only if has data)
+        if self._has_b:
+            ws2 = wb.create_sheet("Capture_B")
+            _write_sheet(ws2, "Capture_B", self._buf_b)
+
         wb.save(path); self.log_signal.emit(f"[INFO] Excel已保存: {path}")
