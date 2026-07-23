@@ -1,0 +1,8 @@
+{
+  "channel_names": [
+    "PA6 | VORT_R",
+    "PA7 | VOUR_S",
+    "CLK | CLK",
+    "XYNC | XYNC"
+  ]
+}

@@ -10,6 +10,7 @@ static DMA_HandleTypeDef  hdma_adc1   = {0};
 /* ── State ──────────────────────────────────────────────────────────── */
 static bool s_initialized = false;
 static uint32_t s_sampleRate = 1000;
+static bool s_diffMode   = false;   /* false = single-ended, true = ch0 differential (INP3/INN3 on PA6/PA7) */
 
 /* DMA buffer: 2 channels x 32768 max = 65536 half-words (128 KB) */
 static uint16_t s_rawBuf[ADC_BURST_MAX_SAMPLES * ADC_MAX_CHANNELS];
@@ -70,7 +71,7 @@ void APP_ADC_InitDual(uint32_t sample_rate_hz)
 
     if (HAL_ADC_Init(&hadc1) != HAL_OK) { while (1) { } }
 
-    ADC_ConfigChannels(0x07);  /* PA6 + PA7 + PC4 */
+    ADC_ConfigChannels(0x03);  /* PA6/PA7 (diff or single) + PC1 */
 
     s_initialized = true;
 }
@@ -106,15 +107,46 @@ void APP_ADC_ReadDual(uint16_t raw[2])
  *  Layer 4: DMA burst capture
  * ═══════════════════════════════════════════════════════════════════════ */
 
+/* XYNC = PC4. 等 XYNC=1 再启动 burst，对齐帧同步。 */
+static void WaitForXyncRise(void)
+{
+    /* 临时把 PC4 改成 GPIO input（它平时是 analog / ADC1_IN4） */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin   = GPIO_PIN_4;
+    gpio.Mode  = GPIO_MODE_INPUT;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOC, &gpio);
+
+    /* 先等到 XYNC=0（确保后面检测到的是上升沿，不是已经在高的电平） */
+    uint32_t t = 500000;
+    while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_4) == GPIO_PIN_SET && --t) { __NOP(); }
+    /* 再等到 XYNC=1 */
+    t = 500000;
+    while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_4) == GPIO_PIN_RESET && --t) { __NOP(); }
+}
+
 bool APP_ADC_StartBurst(uint8_t ch_mask, uint16_t num_samples)
 {
     if (!s_initialized || num_samples == 0 || num_samples > ADC_BURST_MAX_SAMPLES)
         return false;
 
     uint8_t num_ch = 0;
-    for (uint8_t i = 0; i < ADC_MAX_CHANNELS; i++)
-        if (ch_mask & (1u << i)) num_ch++;
-    if (num_ch == 0) return false;
+    for (uint8_t m = ch_mask; m; m &= m - 1) num_ch++;  /* popcount */
+    if (num_ch == 0 || num_ch > ADC_MAX_CHANNELS) return false;
+
+    /* ── 等 XYNC 上升沿后再采，对齐帧同步 ─────────────────────── */
+    /* 只在通道掩码包含 XYNC (bit4 = 0x10) 时才等；ADC 页面不含 XYNC，直接采 */
+    if (ch_mask & 0x10) {
+        WaitForXyncRise();
+    }
+
+    /* burst 完成后再把 PC4 交还给 analog（ADC_ConfigChannels 会重新配置它） */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin   = GPIO_PIN_4;
+    gpio.Mode  = GPIO_MODE_ANALOG;
+    gpio.Pull  = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOC, &gpio);
 
     ADC_ConfigChannels(ch_mask);
 
@@ -146,12 +178,13 @@ bool APP_ADC_StartBurst(uint8_t ch_mask, uint16_t num_samples)
 
 bool APP_ADC_IsBurstDone(void) { return s_burstDone; }
 
-void APP_ADC_GetBurstResult(const uint16_t **raw0, const uint16_t **raw1,
-                             uint16_t *count)
+void APP_ADC_GetBurstResult(const uint16_t **raw_ptr, uint16_t *count,
+                             uint8_t *num_ch, uint8_t *ch_mask)
 {
-    if (raw0) *raw0 = s_rawBuf;
-    if (raw1) *raw1 = (s_burstNumCh > 1) ? (s_rawBuf + s_burstCount) : NULL;
-    if (count) *count = s_burstCount;
+    if (raw_ptr) *raw_ptr = s_rawBuf;
+    if (count)   *count   = s_burstCount;
+    if (num_ch)  *num_ch  = s_burstNumCh;
+    if (ch_mask) *ch_mask = s_burstChMask;
 }
 
 void APP_ADC_DMA_IRQHandler(void) { HAL_DMA_IRQHandler(&hdma_adc1); }
@@ -241,17 +274,38 @@ static void ADC_ConfigChannels(uint8_t ch_mask)
     sChan.SingleDiff   = LL_ADC_SINGLE_ENDED;
 
     if (ch_mask & 0x01) {
-        sChan.Channel = ADC_CHANNEL_3;
+        sChan.Channel    = ADC_CHANNEL_3;
+        sChan.SingleDiff = s_diffMode ? LL_ADC_DIFFERENTIAL_ENDED
+                                       : LL_ADC_SINGLE_ENDED;
+        sChan.SamplingTime = s_diffMode ? ADC_SAMPLETIME_8CYCLES_5
+                                         : ADC_SAMPLETIME_2CYCLES_5;
         sChan.Rank    = RANK_TABLE[rank++];
         HAL_ADC_ConfigChannel(&hadc1, &sChan);
     }
-    if (ch_mask & 0x02) {
-        sChan.Channel = ADC_CHANNEL_7;
+    /* ch_mask bit1 (PA7 standalone single-ended): only valid when diff mode
+     * is OFF. When diff mode is on, PA7 is the negative leg of ch3 (INN3)
+     * and can no longer be enabled as a separate channel. */
+    if ((ch_mask & 0x02) && !s_diffMode) {
+        sChan.Channel      = ADC_CHANNEL_7;
+        sChan.SingleDiff   = LL_ADC_SINGLE_ENDED;
+        sChan.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
         sChan.Rank    = RANK_TABLE[rank++];
         HAL_ADC_ConfigChannel(&hadc1, &sChan);
     }
     if (ch_mask & 0x04) {
-        sChan.Channel = ADC_CHANNEL_4;   /* PC4 = ADC1_IN4 */
+        sChan.Channel    = ADC_CHANNEL_11;  /* PC1 = ADC1_INP11  (ADC CH2) */
+        sChan.SingleDiff = LL_ADC_SINGLE_ENDED;
+        sChan.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+        sChan.Rank    = RANK_TABLE[rank++];
+        HAL_ADC_ConfigChannel(&hadc1, &sChan);
+    }
+    if (ch_mask & 0x08) {
+        sChan.Channel = ADC_CHANNEL_9;   /* PB0 = ADC1_IN9  (CLK via dupont) */
+        sChan.Rank    = RANK_TABLE[rank++];
+        HAL_ADC_ConfigChannel(&hadc1, &sChan);
+    }
+    if (ch_mask & 0x10) {
+        sChan.Channel = ADC_CHANNEL_4;   /* PC4 = ADC1_IN4  (XYNC via dupont) */
         sChan.Rank    = RANK_TABLE[rank++];
         HAL_ADC_ConfigChannel(&hadc1, &sChan);
     }
@@ -261,6 +315,11 @@ static void ADC_ConfigChannels(uint8_t ch_mask)
 }
 
 /* ── Host-driven sample rate reconfig ─────────────────────────────── */
+void APP_ADC_SetDiffMode(bool enable)
+{
+    s_diffMode = enable;
+}
+
 void APP_ADC_SetSampleRate(uint32_t sample_rate_hz)
 {
     if (sample_rate_hz == 0) return;

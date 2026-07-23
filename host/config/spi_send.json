@@ -1,0 +1,53 @@
+{
+  "rows": [
+    {
+      "checked": true,
+      "label": "写寄存器",
+      "addr": "0x0E",
+      "data": "0x8000",
+      "delay_ms": 100
+    },
+    {
+      "checked": true,
+      "label": "写寄存器",
+      "addr": "0x0A",
+      "data": "0x0004",
+      "delay_ms": 100
+    },
+    {
+      "checked": true,
+      "label": "写寄存器",
+      "addr": "0x0B",
+      "data": "0x7804",
+      "delay_ms": 100
+    },
+    {
+      "checked": true,
+      "label": "写寄存器",
+      "addr": "0x0C",
+      "data": "0x7804",
+      "delay_ms": 100
+    },
+    {
+      "checked": true,
+      "label": "写寄存器",
+      "addr": "0x0D",
+      "data": "0x7804",
+      "delay_ms": 100
+    },
+    {
+      "checked": false,
+      "label": "写寄存器",
+      "addr": "00",
+      "data": "00",
+      "delay_ms": 100
+    },
+    {
+      "checked": false,
+      "label": "写寄存器",
+      "addr": "00",
+      "data": "00",
+      "delay_ms": 100
+    }
+  ]
+}

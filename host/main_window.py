@@ -16,6 +16,7 @@ from comm.protocol import CMD_ACK
 from widgets.wave_panel import WavePanel
 from widgets.spi_panel import SpiPanel
 from widgets.adc_panel import AdcPanel
+from widgets.snap_panel import SnapPanel
 from widgets.dac_panel import DacPanel
 
 
@@ -83,6 +84,10 @@ class MainWindow(QMainWindow):
         self.adc_panel.log_signal.connect(self._log)
         self.tabs.addTab(self.adc_panel, "ADC")
 
+        self.snap_panel = SnapPanel(self.link)
+        self.snap_panel.log_signal.connect(self._log)
+        self.tabs.addTab(self.snap_panel, "快照")
+
         self.dac_panel = DacPanel(self.link)
         self.dac_panel.log_signal.connect(self._log)
         self.tabs.addTab(self.dac_panel, "DAC")
@@ -109,11 +114,28 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage(f"就绪 | 日志: {os.path.basename(self._log_path)}")
 
+    @staticmethod
+    def _is_junk_port(p):
+        """判断是否为无关端口（蓝牙串口、软件虚拟COM等），True=应过滤掉。"""
+        desc = (p.description or "").lower()
+        hwid = (p.hwid or "").lower()
+        # 蓝牙串口：hwid 含 "bth\enum" 或描述含 "bluetooth"/"蓝牙"
+        if "bth\\enum" in hwid or "bthenum" in hwid:
+            return True
+        if "bluetooth" in desc or "蓝牙" in desc:
+            return True
+        # 软件虚拟COM：hwid 以 "root\" 开头（如 com0com、Virtual Serial Port）
+        if hwid.startswith("root\\") or hwid.startswith("swd\\"):
+            return True
+        return False
+
     def _refresh_ports(self):
         import serial.tools.list_ports
         self.cb_port.clear()
         ports = serial.tools.list_ports.comports()
         for p in ports:
+            if self._is_junk_port(p):
+                continue
             self.cb_port.addItem(f"{p.device} - {p.description}", p.device)
         if self.cb_port.count() == 0:
             self.cb_port.addItem("未找到串口")
@@ -141,6 +163,10 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _log(self, text: str):
         self.log_edit.appendPlainText(text)
+        # 自动追随：最新日志滚到可见
+        self.log_edit.verticalScrollBar().setValue(
+            self.log_edit.verticalScrollBar().maximum()
+        )
         if hasattr(self, '_log_file') and self._log_file:
             self._log_file.write(text + "\n")
             self._log_file.flush()
@@ -150,12 +176,14 @@ class MainWindow(QMainWindow):
         self.wave_panel.on_frame(frame)
         self.spi_panel.on_frame(frame)
         self.adc_panel.on_frame(frame)
+        self.snap_panel.on_frame(frame)
         self.dac_panel.on_frame(frame)
 
         if frame.cmd == CMD_ACK:
             self.log_signal.emit("[RX] 确认")
         elif frame.cmd == 0xFF:
-            self.log_signal.emit(f"[RX] 心跳: {frame.payload.decode('latin-1')}")
+            # 心跳不再显示到日志区，避免挤掉真正的错误/执行日志
+            return
         else:
             self.log_signal.emit(f"[RX] 命令=0x{frame.cmd:02X} 长度={len(frame.payload)}")
 

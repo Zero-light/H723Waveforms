@@ -21,6 +21,7 @@ import openpyxl
 
 from comm.protocol import (
     build_wave_config, build_wave_data, build_wave_ctrl,
+    build_wave_ctrl_one_shot,
     CMD_ACK,
 )
 from comm.serial_link import SerialLink
@@ -116,11 +117,11 @@ class WavePanel(QWidget):
         cfg_inner.addLayout(row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("掩码:"))
-        self.sb_chmask = QSpinBox()
-        self.sb_chmask.setRange(1, 31)
-        self.sb_chmask.setValue(31)
-        row.addWidget(self.sb_chmask)
+        self.cb_send_sclk = QCheckBox("发送SCLK")
+        self.cb_send_sclk.setChecked(True)
+        self.cb_send_sclk.setToolTip("勾选时正常输出SCLK时钟；取消后SCLK引脚不发时钟（保持低电平），其余通道正常")
+        self.cb_send_sclk.stateChanged.connect(lambda: self._schedule_plot_update())
+        row.addWidget(self.cb_send_sclk)
         cfg_inner.addLayout(row)
 
         row = QHBoxLayout()
@@ -154,6 +155,7 @@ class WavePanel(QWidget):
         self.btn_generate = QPushButton("生成并加载到设备")
         self.btn_generate.clicked.connect(self._unified_generate)
         cfg_inner.addWidget(self.btn_generate)
+
         cfg_inner.addStretch()
 
         ctrl_layout.addWidget(cfg_box, stretch=0)
@@ -232,6 +234,11 @@ class WavePanel(QWidget):
         self.btn_start = QPushButton("开始")
         self.btn_start.clicked.connect(lambda: self._send_ctrl(True))
         play_inner.addWidget(self.btn_start)
+
+        self.btn_one_shot = QPushButton("单周期发送")
+        self.btn_one_shot.setToolTip("发送一轮波形后自动停止，所有引脚拉低")
+        self.btn_one_shot.clicked.connect(self._on_one_shot)
+        play_inner.addWidget(self.btn_one_shot)
 
         self.btn_stop = QPushButton("停止")
         self.btn_stop.clicked.connect(lambda: self._send_ctrl(False))
@@ -582,7 +589,6 @@ class WavePanel(QWidget):
     def _add_rule(self):
         row = self.rule_table.rowCount()
         self.rule_table.insertRow(row)
-        self._save_rules()
         ch_combo = QComboBox()
         for name in CH_NAMES:
             if name == "SCLK":
@@ -608,6 +614,7 @@ class WavePanel(QWidget):
         btn = QPushButton("删除")
         btn.clicked.connect(lambda checked, r=row: self._remove_rule(r))
         self.rule_table.setCellWidget(row, 4, btn)
+        self._save_rules()
 
     def _remove_rule(self, row):
         self.rule_table.removeRow(row)
@@ -782,7 +789,12 @@ class WavePanel(QWidget):
         for c in range(NUM_CH):
             y_base = (4 - c) * 1.5
             offset = self._offset_spins[c].value() if c < len(self._offset_spins) else 0.0
-            x, y = self._stair_step(ch_states[c], y_base, offset)
+            # 取消发送SCLK时，SCLK预览强制全低
+            if c == 1 and not self.cb_send_sclk.isChecked():
+                arr = np.zeros_like(ch_states[c])
+                x, y = self._stair_step(arr, y_base, offset)
+            else:
+                x, y = self._stair_step(ch_states[c], y_base, offset)
             self._curves[c].setData(x, y)
             # Update name label position to follow offset
             if c < len(self._name_labels):
@@ -990,7 +1002,7 @@ class WavePanel(QWidget):
         config_items = [
             ("采样率(Hz)", data.get("wave_rate", "")),
             ("点数", data.get("wave_points", "")),
-            ("掩码", data.get("wave_chmask", "")),
+            ("掩码", 31),  # 固定31
             ("SCLK初始", data.get("sclk_init", "")),
             ("有效边沿", data.get("sclk_edge", "")),
             ("CLK截止", data.get("sclk_cutoff", "")),
@@ -1090,8 +1102,7 @@ class WavePanel(QWidget):
                             try: self.sb_points.setValue(int(val))
                             except: pass
                         elif "掩码" in str(param):
-                            try: self.sb_chmask.setValue(int(val))
-                            except: pass
+                            pass  # 掩码固定31，忽略
                         elif "SCLK" in str(param):
                             idx_find = self.cb_sclk_init.findText(str(val))
                             if idx_find >= 0: self.cb_sclk_init.setCurrentIndex(idx_find)
@@ -1119,16 +1130,22 @@ class WavePanel(QWidget):
     def _get_bsrr_masks(self):
         """Build BSRR masks from state transitions, matching the default
         waveform style: only set BS/BR for pins that actually toggle.
-        Pins that stay low across the whole buffer get no BR at all."""
+        Pins that stay at a constant level across the whole buffer get a
+        one-time BS/BR in the first mask to ensure correct initial state."""
         masks = []
         rows = self.table.rowCount()
         # Seed prev_state from the last row so the circular buffer wraps cleanly.
         prev_state = 0
+        first_state = 0
         if rows > 0:
             for c in range(NUM_CH):
                 item = self.table.item(rows - 1, c)
                 if item is not None and item.text().strip() == "1":
                     prev_state |= (1 << c)
+                # Also capture first row state for constant-channel fix
+                item0 = self.table.item(0, c)
+                if item0 is not None and item0.text().strip() == "1":
+                    first_state |= (1 << c)
 
         for r in range(rows):
             state = 0
@@ -1150,6 +1167,22 @@ class WavePanel(QWidget):
 
             masks.append(bsrr)
             prev_state = state
+
+        # Fix: channels that are constant across the entire buffer produce no
+        # BSRR transitions, so the GPIO pin never changes from its boot state.
+        # Force a one-time BS/BR in the first mask to ensure correct initial level.
+        if masks:
+            for i, bit in enumerate(CH_BITS):
+                has_transition = any(
+                    (m & (1 << bit)) or (m & (1 << (bit + 16)))
+                    for m in masks
+                )
+                if not has_transition:
+                    if first_state & (1 << i):
+                        masks[0] |= (1 << bit)          # force HIGH
+                    else:
+                        masks[0] |= (1 << (bit + 16))   # force LOW
+
         return masks
 
     @staticmethod
@@ -1175,7 +1208,7 @@ class WavePanel(QWidget):
         frame = build_wave_config(
             update_rate,
             self.sb_points.value(),
-            self.sb_chmask.value(),
+            31,  # 默认全部通道使能
         )
         self.link.send(frame.to_bytes())
         self.log_signal.emit(
@@ -1189,6 +1222,21 @@ class WavePanel(QWidget):
             QMessageBox.warning(self, "???", "??????")
             return False
         masks = self._get_bsrr_masks()
+        # 若不发送 SCLK，将 BSRR 中 SCLK 对应的 bits(PA1=bit1, bit17) 清零
+        sclk_bit = CH_BITS[1]  # SCLK = index 1 → bit 1
+        if not self.cb_send_sclk.isChecked():
+            sclk_bits = (1 << sclk_bit) | (1 << (sclk_bit + 16))
+            masks = [m & ~sclk_bits for m in masks]
+        # DEBUG: log first few BSRR masks and SCLK config
+        sclk_init = self.cb_sclk_init.currentText()
+        sclk_edge = self.cb_sclk_edge.currentText()
+        init_states = {CH_NAMES[i]: chk.isChecked() for i, chk in self._initial_checks}
+        self.log_signal.emit(
+            f"[DEBUG] SCLK: init={sclk_init} edge={sclk_edge} "
+            f"send_sclk={self.cb_send_sclk.isChecked()} "
+            f"init_states={init_states} "
+            f"BSRR[0:5]={' '.join(f'0x{m:08X}' for m in masks[:5])}"
+        )
         if len(masks) > 0 and all(m == 0 for m in masks):
             QMessageBox.warning(self, "????",
                 "BSRR ???????????\n"
@@ -1202,9 +1250,9 @@ class WavePanel(QWidget):
             self.log_signal.emit("[SAFETY] ???????????")
             return False
 
-        if len(masks) > 2048:
+        if len(masks) > 8192:
             QMessageBox.information(self, "??",
-                f"???? {len(masks)} ????????????")
+                f"???? {len(masks)} ????????? 8192 ??")
             return False
         frame = build_wave_data(masks)
         self.link.send(frame.to_bytes())
@@ -1218,6 +1266,7 @@ class WavePanel(QWidget):
             return
         self._fill_sclk(silent=True)
         self._send_data()
+        self._schedule_plot_update()  # 发送后刷新预览
 
     def _send_ctrl(self, start):
         if not self.link.is_open():
@@ -1226,6 +1275,29 @@ class WavePanel(QWidget):
         frame = build_wave_ctrl(start)
         self.link.send(frame.to_bytes())
         self.log_signal.emit(f"[TX] 波形控制 {'开始' if start else '停止'}")
+
+    def _on_one_shot(self):
+        """一键：配置→规则→填充→发数据→单周期发送(自动停+拉低)"""
+        if not self.link.is_open():
+            QMessageBox.warning(self, "未连接", "串口未打开。")
+            return
+        self._send_config()
+        if not self._apply_rules():
+            return
+        self._fill_sclk(silent=True)
+        self._send_data()
+        # 发 one-shot 控制帧：固件跑一轮 buffer 后自动停 + 拉低所有引脚
+        frame = build_wave_ctrl_one_shot()
+        self.link.send(frame.to_bytes())
+        self.log_signal.emit("[TX] 单周期发送 (一轮后自动停止并拉低)")
+        self.btn_one_shot.setEnabled(False)
+        self.btn_one_shot.setText("单周期发送中…")
+        # 固件自动停止后，通过心跳/ACK 恢复按钮；这里用 QTimer 给个保守恢复
+        QTimer.singleShot(1000, self._reset_one_shot_btn)
+
+    def _reset_one_shot_btn(self):
+        self.btn_one_shot.setEnabled(True)
+        self.btn_one_shot.setText("单周期发送")
 
     def on_frame(self, frame):
         if frame.cmd == CMD_ACK:
@@ -1249,7 +1321,7 @@ class WavePanel(QWidget):
         data["sclk_cutoff"] = self.sb_sclk_cutoff.value()
         data["wave_rate"] = self.sb_rate.value()
         data["wave_points"] = self.sb_points.value()
-        data["wave_chmask"] = self.sb_chmask.value()
+        data["wave_chmask"] = 31  # 固定31
         initial = {}
         for i, chk in self._initial_checks:
             initial[str(i)] = chk.isChecked()
@@ -1317,8 +1389,7 @@ class WavePanel(QWidget):
             self.sb_rate.setValue(data["wave_rate"])
         if "wave_points" in data:
             self.sb_points.setValue(data["wave_points"])
-        if "wave_chmask" in data:
-            self.sb_chmask.setValue(data["wave_chmask"])
+        # wave_chmask 已移除（固定31），旧配置文件字段不再使用
         # Initial states
         if "initial_states" in data:
             initial = data["initial_states"]

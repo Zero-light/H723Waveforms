@@ -78,12 +78,10 @@ int main(void)
     s_defaultWave[0] = (1u << 1);   /* SET  PA1/SCLK -> 高电平 */
     s_defaultWave[1] = (1u << 17);  /* RESET PA1/SCLK -> 低电平 (下降沿) */
 
-    HAL_DMA_Start(&hdma_tim2_up,
-                  (uint32_t)s_defaultWave,
-                  (uint32_t)&GPIOA->BSRR,
-                  2);
-    __HAL_TIM_ENABLE_DMA(&htim2, TIM_DMA_UPDATE);
-    HAL_TIM_Base_Start(&htim2);
+    APP_WaveGen_LoadData(s_defaultWave, 2);
+    APP_WaveGen_Start();
+    /* Note: APP_WaveGen_Start sets s_running = true so future
+     * APP_WaveGen_Configure will properly call APP_WaveGen_Stop. */
     /* USER CODE END 2 */
 
     /* Infinite loop */
@@ -167,29 +165,38 @@ static void OnFrameReceived(const Frame_t *frame)
                 break;
             }
             uint16_t num_words = frame->len / 4;
-            uint32_t data[256];
-            if (num_words > 256) num_words = 256;
+            /* s_waveBuf 在 app_wavegen.c 中定义为 WAVE_MAX_POINTS (8192)，
+             * 直接用帧数据解码到静态缓冲区，避免中间截断。 */
+            if (num_words == 0 || num_words > WAVE_MAX_POINTS) {
+                APP_Protocol_SendAck(CMD_WAVE_DATA, false);
+                break;
+            }
             for (uint16_t i = 0; i < num_words; i++) {
-                data[i] = ((uint32_t)frame->payload[i*4])
+                s_waveBuf[i] = ((uint32_t)frame->payload[i*4])
                         | ((uint32_t)frame->payload[i*4 + 1] << 8)
                         | ((uint32_t)frame->payload[i*4 + 2] << 16)
                         | ((uint32_t)frame->payload[i*4 + 3] << 24);
             }
-            bool ok = APP_WaveGen_LoadData(data, num_words);
+            bool ok = APP_WaveGen_LoadData(s_waveBuf, num_words);
             APP_Protocol_SendAck(CMD_WAVE_DATA, ok);
             break;
         }
 
         case CMD_WAVE_CTRL:
         {
-            /* Payload[0]: 1 = start, 0 = stop */
+            /* Payload[0]: 1 = start, 0 = stop
+             * Payload[1]: 1 = one-shot (auto-stop + pulldown after one buffer) */
             if (frame->len < 1) {
                 APP_Protocol_SendAck(CMD_WAVE_CTRL, false);
                 break;
             }
             bool ok;
             if (frame->payload[0]) {
-                ok = APP_WaveGen_Start();
+                if (frame->len >= 2 && frame->payload[1]) {
+                    ok = APP_WaveGen_OneShot();
+                } else {
+                    ok = APP_WaveGen_Start();
+                }
             } else {
                 APP_WaveGen_Stop();
                 ok = true;
@@ -200,11 +207,16 @@ static void OnFrameReceived(const Frame_t *frame)
 
         case CMD_ADC_CONFIG:
         {
+            /* payload: ch_mask(1) + rate(4) + mode(1)
+             * mode bit0: 1 = differential (PA6=INP3, PA7=INN3),
+             *            0 = single-ended (default, used by snap panel) */
             if (frame->len < 6) { APP_Protocol_SendAck(CMD_ADC_CONFIG, false); break; }
             uint32_t rate = ((uint32_t)frame->payload[1])
                           | ((uint32_t)frame->payload[2] << 8)
                           | ((uint32_t)frame->payload[3] << 16)
                           | ((uint32_t)frame->payload[4] << 24);
+            bool diff = (frame->payload[5] & 0x01) != 0;
+            APP_ADC_SetDiffMode(diff);
             APP_ADC_SetSampleRate(rate);
             APP_Protocol_SendAck(CMD_ADC_CONFIG, true);
             break;
@@ -413,9 +425,13 @@ static void MX_GPIO_Init(void)
     GPIO_InitStructAnalog.Pin = GPIO_PIN_6 | GPIO_PIN_7;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStructAnalog);
 
-    /* PC4 (ADC1_IN4) as analog — 3rd ADC channel */
-    GPIO_InitStructAnalog.Pin = GPIO_PIN_4;
+    /* PC1 (ADC1_INP11) + PC4 (ADC1_IN4) as analog — ADC CH2 + XYNC snapshot */
+    GPIO_InitStructAnalog.Pin = GPIO_PIN_1 | GPIO_PIN_4;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStructAnalog);
+
+    /* PB0 (ADC1_IN9) as analog — CLK snapshot input */
+    GPIO_InitStructAnalog.Pin = GPIO_PIN_0;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStructAnalog);
 
     __HAL_RCC_SYSCFG_CLK_ENABLE();
 

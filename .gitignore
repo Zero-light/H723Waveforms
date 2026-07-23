@@ -21,6 +21,7 @@ __pycache__/
 *.pyo
 host/build/
 host/dist/
+host/H723Waveforms/
 便捷开发工具/V1.0.1/src/build/
 便捷开发工具/V1.0.1/src/dist/
 

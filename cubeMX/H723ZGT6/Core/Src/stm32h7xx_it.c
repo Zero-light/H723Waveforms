@@ -205,6 +205,11 @@ void SysTick_Handler(void)
   */
 void DMA1_Stream0_IRQHandler(void)
 {
+  /* TC interrupt is only enabled in one-shot mode (see APP_WaveGen_OneShot).
+   * HAL_DMA_IRQHandler clears the TC flag and, because the IT is enabled,
+   * invokes HAL_DMA_ConvCpltCallback → APP_WaveGen_DmaComplete() which
+   * pulls all enabled pins LOW and stops TIM2+DMA.  In loop mode the TC
+   * IT is disabled, so the callback never fires and DMA keeps repeating. */
   HAL_DMA_IRQHandler(&hdma_tim2_up);
 }
 

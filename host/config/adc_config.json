@@ -1,0 +1,21 @@
+{
+  "adc_offset_v": -0.05,
+  "sample_rate": 600000,
+  "sample_points": 5000,
+  "mode": 0,
+  "channel_enabled": [
+    true,
+    true,
+    true
+  ],
+  "channel_names": [
+    "Vout_R",
+    "Vout_S",
+    "RST"
+  ],
+  "channel_offsets": [
+    0.0,
+    0.0,
+    0.0
+  ]
+}

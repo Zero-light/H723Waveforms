@@ -6,9 +6,33 @@
 extern TIM_HandleTypeDef htim2;
 extern DMA_HandleTypeDef hdma_tim2_up;
 
-static uint32_t s_waveBuf[WAVE_MAX_POINTS];
+uint32_t s_waveBuf[WAVE_MAX_POINTS];
 static WaveConfig_t s_config = {0};
-static volatile bool s_running = false;
+static volatile bool s_running  = false;
+static volatile bool s_onepass  = false;   /* one-shot: run one buffer then auto-stop + pulldown */
+
+/* Pull all enabled waveform pins LOW via BSRR reset half (deterministic idle). */
+static void WaveGen_Pulldown(void)
+{
+    uint32_t bsrr = 0;
+    if (s_config.ch_mask & (1u << 0)) bsrr |= (1u << (WAVE_CH0_BIT + 16));
+    if (s_config.ch_mask & (1u << 1)) bsrr |= (1u << (WAVE_CH1_BIT + 16));
+    if (s_config.ch_mask & (1u << 2)) bsrr |= (1u << (WAVE_CH2_BIT + 16));
+    if (s_config.ch_mask & (1u << 3)) bsrr |= (1u << (WAVE_CH3_BIT + 16));
+    if (s_config.ch_mask & (1u << 4)) bsrr |= (1u << (WAVE_CH4_BIT + 16));
+    if (bsrr) GPIOA->BSRR = bsrr;
+}
+
+/* HAL DMA transfer-complete callback.
+ * Only fires when DMA_IT_TC is enabled, i.e. one-shot mode.
+ * Pulls all enabled pins LOW then stops TIM2 + DMA. */
+void HAL_DMA_XferCpltCallback(DMA_HandleTypeDef *hdma)
+{
+    if (hdma != &hdma_tim2_up) return;
+    if (!s_onepass) return;
+    WaveGen_Pulldown();
+    APP_WaveGen_Stop();
+}
 
 /* Build BSRR mask from 5-bit channel state.
  * state bit0 -> PA0 (XYNC), bit1 -> PA1 (SCLK), bit2 -> PA2 (SH_R),
@@ -104,6 +128,14 @@ bool APP_WaveGen_Start(void)
 {
     if (s_running || s_config.num_points == 0) return false;
 
+    /* Ensure DMA is in READY state before starting (may be BUSY from boot
+     * default waveform or a prior configuration). */
+    HAL_DMA_Abort(&hdma_tim2_up);
+
+    hdma_tim2_up.Init.Mode = DMA_CIRCULAR;      /* loop mode */
+    HAL_DMA_Init(&hdma_tim2_up);
+    s_onepass = false;
+
     /* Configure DMA from s_waveBuf to GPIOA->BSRR (circular mode, no IRQ needed) */
     HAL_DMA_Start(&hdma_tim2_up,
                   (uint32_t)s_waveBuf,
@@ -120,6 +152,31 @@ bool APP_WaveGen_Start(void)
     return true;
 }
 
+/* One-shot mode: run exactly one buffer, then auto-stop and pull all
+ * enabled pins LOW.  TC interrupt fires at buffer end. */
+bool APP_WaveGen_OneShot(void)
+{
+    if (s_running || s_config.num_points == 0) return false;
+
+    HAL_DMA_Abort(&hdma_tim2_up);
+
+    hdma_tim2_up.Init.Mode = DMA_NORMAL;        /* single-pass, stops at TC */
+    HAL_DMA_Init(&hdma_tim2_up);
+    __HAL_DMA_ENABLE_IT(&hdma_tim2_up, DMA_IT_TC);   /* enable TC IRQ */
+    s_onepass = true;
+
+    HAL_DMA_Start(&hdma_tim2_up,
+                  (uint32_t)s_waveBuf,
+                  (uint32_t)&GPIOA->BSRR,
+                  s_config.num_points);
+
+    __HAL_TIM_ENABLE_DMA(&htim2, TIM_DMA_UPDATE);
+    HAL_TIM_Base_Start(&htim2);
+
+    s_running = true;
+    return true;
+}
+
 void APP_WaveGen_Stop(void)
 {
     if (!s_running) return;
@@ -129,6 +186,7 @@ void APP_WaveGen_Stop(void)
     HAL_DMA_Abort(&hdma_tim2_up);
 
     s_running = false;
+    s_onepass = false;
 }
 
 bool APP_WaveGen_IsRunning(void)

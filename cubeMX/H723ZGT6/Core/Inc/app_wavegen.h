@@ -20,10 +20,14 @@ typedef struct {
     uint8_t  ch_mask;           /* Enabled channels bitmask */
 } WaveConfig_t;
 
+/* Waveform sample buffer (defined in app_wavegen.c). */
+extern uint32_t s_waveBuf[WAVE_MAX_POINTS];
+
 void APP_WaveGen_Init(void);
 bool APP_WaveGen_Configure(const WaveConfig_t *cfg);
 bool APP_WaveGen_LoadData(const uint32_t *data, uint16_t len);
 bool APP_WaveGen_Start(void);
+bool APP_WaveGen_OneShot(void);     /* run one buffer, then auto-stop + pull pins LOW */
 void APP_WaveGen_Stop(void);
 bool APP_WaveGen_IsRunning(void);
 const WaveConfig_t* APP_WaveGen_GetConfig(void);

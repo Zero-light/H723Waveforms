@@ -98,6 +98,15 @@ def build_wave_ctrl(start: bool) -> Frame:
     return Frame(CMD_WAVE_CTRL, bytes([1 if start else 0]))
 
 
+def build_wave_ctrl_one_shot() -> Frame:
+    """One-shot: run one buffer then firmware auto-stops + pulls pins LOW.
+
+    payload[0] = 1  (start)
+    payload[1] = 1  (one-shot flag; 0 = loop)
+    """
+    return Frame(CMD_WAVE_CTRL, bytes([1, 1]))
+
+
 def build_adc_config(ch_mask: int, sample_rate_hz: int, mode: int = 0) -> Frame:
     payload = struct.pack("<B", ch_mask) + struct.pack("<I", sample_rate_hz) + struct.pack("<B", mode)
     return Frame(CMD_ADC_CONFIG, payload)
